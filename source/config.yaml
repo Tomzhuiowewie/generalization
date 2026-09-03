@@ -1,0 +1,28 @@
+paths:
+  train_data: 'E:\Tasks\PINN\Wuda\generalization\data\train_prepared.pt'
+  validation_data: 'E:\Tasks\PINN\Wuda\generalization\data\validation_prepared.pt'
+  test_data: 'E:\Tasks\PINN\Wuda\generalization\data\test_prepared.pt'
+  normalization: 'E:\Tasks\PINN\Wuda\generalization\data\normalization_scales.pt'
+  figure_dir: 'E:\Tasks\PINN\Wuda\generalization\figures\real'
+
+training:
+  seed: 2032
+  epochs: 20
+  pretrain_epochs: 0
+  learning_rate: 1.0e-3
+  cases_per_batch: 8
+  points_per_case: 512
+  gradient_clip: 1.0
+
+loss_weights:
+  mass: 10.0
+  momentum: 1.0e-6
+
+monitor:
+  case_count: 16
+  time_step: 24
+  time_batch: 24
+  final_test_time_step: 1
+
+plot:
+  contour_levels: 8

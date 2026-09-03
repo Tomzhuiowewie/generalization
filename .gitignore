@@ -1,0 +1,36 @@
+# Data and generated results
+/data/
+/figures/
+/runs/
+/outputs/
+/checkpoints/
+/logs/
+
+# Model and array files
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+
+# Python cache and environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local editor and system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Ignore specific files or directories
+wuda_river1d
