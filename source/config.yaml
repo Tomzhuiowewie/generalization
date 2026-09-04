@@ -16,7 +16,7 @@ data:
 training:
   seed: 2032
   epochs: 100
-  pretrain_epochs: 30
+  pretrain_epochs: 0
   learning_rate: 1.0e-3
   cases_per_batch: 8
   points_per_case: 512

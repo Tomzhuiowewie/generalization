@@ -2,13 +2,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+def initialize_weights(self):
+    for module in self.modules():
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, gain=1.0)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
 
 class GeometryEncoder(nn.Module):
     def __init__(self, geo_dim=32):
         super().__init__()
 
         self.point_net = nn.Sequential(
-            nn.Linear(2, 64), nn.GELU(),
+            nn.Linear(2, 64), nn.Tanh(),
             nn.Linear(64, geo_dim),
         )
 
@@ -36,22 +43,22 @@ class OperatorPINN(nn.Module):
             self.register_buffer(name, torch.as_tensor(value, dtype=torch.float32))
 
         self.condition_branch = nn.Sequential(
-            nn.Linear(condition_dim, 64), nn.GELU(),
-            nn.Linear(64, 64), nn.GELU(),
+            nn.Linear(condition_dim, 64), nn.Tanh(),
+            nn.Linear(64, 64), nn.Tanh(),
             nn.Linear(64, 32),
         )
 
         self.geo_branch = GeometryEncoder(geo_dim=32)
 
         self.trunk = nn.Sequential(
-            nn.Linear(2, 64), nn.GELU(),
-            nn.Linear(64, 64), nn.GELU(),
+            nn.Linear(2, 64), nn.Tanh(),
+            nn.Linear(64, 64), nn.Tanh(),
             nn.Linear(64, 32),
         )
 
         self.shared_head = nn.Sequential(
-            nn.Linear(32 * 3, 64), nn.GELU(),
-            nn.Linear(64, 64), nn.GELU()
+            nn.Linear(32 * 3, 64), nn.Tanh(),
+            nn.Linear(64, 64), nn.Tanh()
         )
 
         # 水深（水位）输出头
@@ -59,6 +66,8 @@ class OperatorPINN(nn.Module):
 
         # 流量输出头
         self.q_head = nn.Linear(64, 1)
+
+        self.apply(initialize_weights)
 
 
     def forward(self, x, t, ic, bc, geo, geo_mask, bed, debug=False):
