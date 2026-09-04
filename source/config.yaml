@@ -1,14 +1,22 @@
 paths:
-  train_data: 'E:\Tasks\PINN\Wuda\generalization\data\train_prepared.pt'
-  validation_data: 'E:\Tasks\PINN\Wuda\generalization\data\validation_prepared.pt'
-  test_data: 'E:\Tasks\PINN\Wuda\generalization\data\test_prepared.pt'
-  normalization: 'E:\Tasks\PINN\Wuda\generalization\data\normalization_scales.pt'
-  figure_dir: 'E:\Tasks\PINN\Wuda\generalization\figures\real'
+  project_dir: '..'
+  csv:
+    ras_dir: 'data/csv/ras'
+    geo_dir: 'data/csv/geo'
+  pt:
+    train: 'data/pt/train_prepared.pt'
+    validation: 'data/pt/validation_prepared.pt'
+    test: 'data/pt/test_prepared.pt'
+    normalization: 'data/pt/normalization_scales.pt'
+  figure_dir: 'figures'
+
+data:
+  max_geo_points: 481
 
 training:
   seed: 2032
-  epochs: 20
-  pretrain_epochs: 0
+  epochs: 100
+  pretrain_epochs: 30
   learning_rate: 1.0e-3
   cases_per_batch: 8
   points_per_case: 512

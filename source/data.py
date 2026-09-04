@@ -3,18 +3,38 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from utils.geometry import water_area, water_area_at_x
+from utils.geometry import water_area
+import yaml
 
-project_dir = Path(__file__).resolve().parent.parent
-ras_data_dir = project_dir / "data" / "ras"
-geo_data_dir = project_dir / "data" / "geo"
-max_geo_points = 481    # 最大河道剖面点数
+config_path = Path(__file__).with_name("config.yaml")
+with config_path.open("r", encoding="utf-8") as file:
+    config = yaml.safe_load(file)
 
-normalization_cache_file = project_dir / "data" / "normalization_scales.pt"
+project_dir = (config_path.parent / config["paths"]["project_dir"]).resolve()
+ras_data_dir = (project_dir / config["paths"]["csv"]["ras_dir"]).resolve()
+geo_data_dir = (project_dir / config["paths"]["csv"]["geo_dir"]).resolve()
+max_geo_points = config["data"]["max_geo_points"]
+
+def sample_points(case, count):
+    """从一个工况随机抽取 count 个时空点。"""
+    ti = torch.randint(len(case["t"]), (count,))
+    xi = torch.randint(len(case["x"]), (count,))
+
+    return {
+        "x": case["x"][xi, None],
+        "t": case["t"][ti, None],
+        "ic": case["ic"][None].expand(count, -1),
+        "bc": case["bc"][None].expand(count, -1),
+        "geo": case["geo"][xi],
+        "geo_mask": case["geo_mask"][xi],
+        "z": case["z"][ti, xi, None],
+        "q": case["q"][ti, xi, None],
+        "manning_n": case["manning_n"].expand(count, 1),
+    }
 
 
 def calculate_normalization_scales(dataset):
-    """使用训练集计算归一化参数"""
+    """基于训练集计算归一化参数"""
     all_z = torch.cat([case["z"].reshape(-1) for case in dataset.values()]) # 水位
     all_q = torch.cat([case["q"].reshape(-1) for case in dataset.values()])   # 流量
     all_valid_geo = torch.cat([case["geo"][case["geo_mask"]] for case in dataset.values()], dim=0)   # 有效的河道剖面点
@@ -82,75 +102,22 @@ def calculate_normalization_scales(dataset):
     }
 
 
-def load_normalization_scales(dataset):
-    """优先读取缓存；缓存不存在时计算并保存。"""
-
-    if normalization_cache_file.exists():
-        print(
-            "loading normalization scales:",
-            normalization_cache_file,
-        )
-
-        return torch.load(
-            normalization_cache_file,
-            map_location="cpu",
-            weights_only=True,
-        )
-
-    print("calculating normalization scales")
-
-    scales = calculate_normalization_scales(dataset)
-
-    normalization_cache_file.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    torch.save(
-        scales,
-        normalization_cache_file,
-    )
-
-    print(
-        "normalization scales saved:",
-        normalization_cache_file,
-    )
-
-    return scales
-
-
-def sample_points(case, count):
-    """从一个工况随机抽取 count 个时空点。"""
-    ti = torch.randint(len(case["t"]), (count,))
-    xi = torch.randint(len(case["x"]), (count,))
-
-    return {
-        "x": case["x"][xi, None],
-        "t": case["t"][ti, None],
-        "ic": case["ic"][None].expand(count, -1),
-        "bc": case["bc"][None].expand(count, -1),
-        "geo": case["geo"][xi],
-        "geo_mask": case["geo_mask"][xi],
-        "z": case["z"][ti, xi, None],
-        "q": case["q"][ti, xi, None],
-        "manning_n": case["manning_n"].expand(count, 1),
-    }
-
-
 def prepare_case(split_name, manning_n=0.016):
-    """从原始表格 NPZ 构造训练数据，不重建 DataFrame。"""
+    """直接读取原始 CSV，构造训练数据（PT）。"""
     prepared_data = {}
     geometry_cache = {}
-    ras_files = sorted(ras_data_dir.glob(f"{split_name}_*_hydrodynamics.npz"))
+    ras_files = sorted(ras_data_dir.glob(f"{split_name}_*_hydrodynamics.csv"))
+
+    if not ras_files:
+        raise FileNotFoundError(f"No {split_name} hydrodynamics CSV files under {ras_data_dir}")
 
     for file_index, file in enumerate(ras_files,start=1):
-        # 读取一个水动力 NPZ
-        with np.load(file, allow_pickle=False) as data:
-            case_id_array = data["combination_id"]
-            time_text = data["time"]
-            river_station = data["river_station"]
-            water_surface = data["water_surface_m"]
-            flow = data["flow_m3s"]
+        data = pd.read_csv(file, encoding="utf-8-sig")
+        case_id_array = data["combination_id"].to_numpy()
+        time_text = data["time"].to_numpy()
+        river_station = data["river_station"].to_numpy()
+        water_surface = data["water_surface_m"].to_numpy()
+        flow = data["flow_m3s"].to_numpy()
 
         case_ids = np.unique(case_id_array)
         case_id = str(case_ids[0])
@@ -194,15 +161,16 @@ def prepare_case(split_name, manning_n=0.016):
         # 获取当前工况的地形编号，如 G000
         geometry_id = case_id.split("_", maxsplit=1)[0]
         if geometry_id not in geometry_cache:    # 相同地形只读取一次
-            geo_files = list(geo_data_dir.glob(f"{geometry_id}" f"_cross_section_geometry.npz"))
-
-            with np.load(geo_files[0], allow_pickle=False) as geo_data:
-                geometry_cache[geometry_id] = {
-                    "river_station": geo_data["river_station"].copy(),
-                    "point_index": geo_data["point_index"].copy(),
-                    "station_m": geo_data["station_m"].copy(),
-                    "elevation_m": geo_data["elevation_m"].copy(),
-                }
+            geo_files = list(geo_data_dir.glob(f"{geometry_id}_cross_section_geometry.csv"))
+            if not geo_files:
+                raise FileNotFoundError(f"No geometry CSV for {geometry_id} under {geo_data_dir}")
+            geo_data = pd.read_csv(geo_files[0], encoding="utf-8-sig")
+            geometry_cache[geometry_id] = {
+                "river_station": geo_data["river_station"].to_numpy(),
+                "point_index": geo_data["point_index"].to_numpy(),
+                "station_m": geo_data["station_m"].to_numpy(),
+                "elevation_m": geo_data["elevation_m"].to_numpy(),
+            }
 
         geometry = geometry_cache[geometry_id]
         geo = np.zeros((section_count, max_geo_points, 2), dtype="float32")
@@ -246,8 +214,23 @@ def prepare_case(split_name, manning_n=0.016):
 
 
 if __name__ == "__main__":
+    prepared_datasets = {}
+
+    # 重新生成训练集、验证集和测试集
     for split in ("train", "validation", "test"):
+        print(f"preparing: {split}")
         dataset = prepare_case(split)
-        output = project_dir / "data" / f"{split}_prepared.pt"
+
+        prepared_datasets[split] = dataset
+        output = (project_dir / config["paths"]["pt"][split]).resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
         torch.save(dataset, output)
-        print("saved:", output)
+        print(f"saved: {output}, cases={len(dataset)}")
+
+    # 使用刚生成的训练集计算归一化参数
+    normalization_scales = calculate_normalization_scales(prepared_datasets["train"])
+    normalization_output = (project_dir / config["paths"]["pt"]["normalization"]).resolve()
+    normalization_output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(normalization_scales, normalization_output)
+
+    print("saved:", normalization_output)

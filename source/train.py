@@ -3,13 +3,20 @@ from pathlib import Path
 
 import torch, math, yaml
 
-from data import prepare_case, load_normalization_scales
 from loss import boundary_loss, initial_loss, pde_loss
 from utils.plot import plot_error_contours, plot_loss_history
 from networks import OperatorPINN
 
-with Path(__file__).with_name("config.yaml").open("r", encoding="utf-8") as file:
+config_path = Path(__file__).with_name("config.yaml")
+with config_path.open("r", encoding="utf-8") as file:
     config = yaml.safe_load(file)
+project_dir = (config_path.parent / config["paths"]["project_dir"]).resolve()
+
+def configured_path(*keys):
+    value = config["paths"]
+    for key in keys:
+        value = value[key]
+    return (project_dir / value).resolve()
 
 def relative_error(model, case, device, time_step=24, time_batch=24):
     was_training = model.training
@@ -58,9 +65,9 @@ def train():
     print("device:", device)
 
     # train_data = prepare_case("train")  # 训练集数据
-    train_data = torch.load(config["paths"]["train_data"], map_location="cpu", weights_only=True)
+    train_data = torch.load(configured_path("pt", "train"), map_location="cpu", weights_only=True)
     # normalization_scales = load_normalization_scales(train_data)   # 加载或计算归一化尺度
-    normalization_scales = torch.load(config["paths"]["normalization"], map_location="cpu", weights_only=True)
+    normalization_scales = torch.load(configured_path("pt", "normalization"), map_location="cpu", weights_only=True)
 
     example_case = list(train_data.values())[0] #  确定数据结构的示例工况
     condition_dim = example_case["ic"].numel() + example_case["bc"].numel() # 计算(初始条件+边界条件)的维度
@@ -79,8 +86,8 @@ def train():
 
     history = {name: [] for name in ("ic_z", "ic_q", "bc_q", "bc_z", "mass", "momentum")}
 
-    validation_data = torch.load(config["paths"]["validation_data"], map_location="cpu", weights_only=True)
-    test_data = torch.load(config["paths"]["test_data"], map_location="cpu", weights_only=True)
+    validation_data = torch.load(configured_path("pt", "validation"), map_location="cpu", weights_only=True)
+    test_data = torch.load(configured_path("pt", "test"), map_location="cpu", weights_only=True)
 
     validation_cases = list(validation_data.values())
     monitor_case_count = config["monitor"]["case_count"]
@@ -188,13 +195,13 @@ def train():
         model,
         test_case,
         device=device,
-        output_path=Path(config["paths"]["figure_dir"]) / f"{case_id}_error_contours_{timestamp}.png",
+        output_path=configured_path("figure_dir") / f"{case_id}_error_contours_{timestamp}.png",
         levels=config["plot"]["contour_levels"],
     )
 
     history_path = plot_loss_history(
         history,
-        output_path=Path(config["paths"]["figure_dir"]) / f"{case_id}_loss_history_{timestamp}.png",
+        output_path=configured_path("figure_dir") / f"{case_id}_loss_history_{timestamp}.png",
     )
     print(f"loss history saved: {history_path}\nerror contour saved: {output_path}")
 
