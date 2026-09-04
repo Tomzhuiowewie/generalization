@@ -34,62 +34,82 @@ def plot_loss_history(history, output_path):
     return output_path
 
 
+def plot_relative_error_history(history, output_path):
+    """绘制训练集和验证集平均相对误差随 epoch 的变化。"""
+    names = ("train_depth", "train_q", "validation_depth", "validation_q")
+    titles = ("Training water-depth error", "Training discharge error", "Validation water-depth error", "Validation discharge error")
+    epochs = np.arange(1, len(history["train_depth"]) + 1)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
+
+    for ax, name, title in zip(axes.flat, names, titles):
+        ax.plot(epochs, np.asarray(history[name], dtype=float), linewidth=1.5)
+        ax.set_title(title)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Mean relative error (%)")
+        ax.grid(True, linestyle="--", alpha=0.3)
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 def plot_error_contours(
     model,
-    case,
+    cases,
     device=None,
     output_path="error_contours.png",
     levels=8,
 ):
-    """绘制一个工况在每个 (x, t) 点上的水位和流量相对误差等值线。"""
+    """绘制所有工况在每个 (x, t) 点上的平均相对误差等值线。"""
+    if not cases:
+        raise ValueError("cases cannot be empty")
     if device is None:
         device = next(model.parameters()).device
 
     was_training = model.training
     model.eval()
 
-    x_values = case["x"].to(device)
-    t_values = case["t"].to(device)
-    true_z = case["z"].to(device)
-    true_q = case["q"].to(device)
+    reference_case = cases[0]
+    x_values = reference_case["x"].to(device)
+    t_values = reference_case["t"].to(device)
     section_count = len(x_values)
+    z_error_sum = torch.zeros((len(t_values), section_count))
+    q_error_sum = torch.zeros_like(z_error_sum)
 
-    ic = case["ic"].to(device)[None].expand(section_count, -1)
-    bc = case["bc"].to(device)[None].expand(section_count, -1)
-    geo = case["geo"].to(device)
-    geo_mask = case["geo_mask"].to(device)
-    bed = case["bed"].to(device)[:, None]
+    for case in cases:
+        if not torch.equal(case["x"], reference_case["x"]) or not torch.equal(case["t"], reference_case["t"]):
+            raise ValueError("All cases must use the same x and t grid")
 
-    pred_z_rows = []
-    pred_q_rows = []
+        true_z = case["z"].to(device)
+        true_q = case["q"].to(device)
+        ic = case["ic"].to(device)[None].expand(section_count, -1)
+        bc = case["bc"].to(device)[None].expand(section_count, -1)
+        geo = case["geo"].to(device)
+        geo_mask = case["geo_mask"].to(device)
+        bed = case["bed"].to(device)[:, None]
+        pred_z_rows = []
+        pred_q_rows = []
 
-    with torch.no_grad():
-        # 每次预测一个时刻的所有断面，避免一次展开整个时空网格。
-        for time_value in t_values:
-            x = x_values[:, None]
-            t = torch.full_like(x, time_value.item())
-            pred_z, pred_q = model(x, t, ic, bc, geo, geo_mask, bed)
-            pred_z_rows.append(pred_z[:, 0].cpu())
-            pred_q_rows.append(pred_q[:, 0].cpu())
+        with torch.no_grad():
+            for time_value in t_values:
+                x = x_values[:, None]
+                t = torch.full_like(x, time_value.item())
+                pred_z, pred_q = model(x, t, ic, bc, geo, geo_mask, bed)
+                pred_z_rows.append(pred_z[:, 0].cpu())
+                pred_q_rows.append(pred_q[:, 0].cpu())
 
-    pred_z = torch.stack(pred_z_rows)
-    pred_q = torch.stack(pred_q_rows)
-    true_z_cpu = true_z.cpu()
-    true_q_cpu = true_q.cpu()
-    bed_cpu = bed[:, 0].cpu()[None, :]
-    true_depth = true_z_cpu - bed_cpu
-    pred_depth = pred_z - bed_cpu
+        pred_z = torch.stack(pred_z_rows)
+        pred_q = torch.stack(pred_q_rows)
+        bed_cpu = bed[:, 0].cpu()[None, :]
+        true_depth = true_z.cpu() - bed_cpu
+        pred_depth = pred_z - bed_cpu
+        z_error_sum += (pred_depth - true_depth).abs() / true_depth.abs().clamp_min(1e-6) * 100.0
+        q_error_sum += (pred_q - true_q.cpu()).abs() / true_q.cpu().abs().clamp_min(1e-6) * 100.0
 
-    z_error = (
-        (pred_depth - true_depth).abs()
-        / true_depth.abs().clamp_min(1e-6)
-        * 100.0
-    ).numpy()
-    q_error = (
-        (pred_q - true_q_cpu).abs()
-        / true_q_cpu.abs().clamp_min(1e-6)
-        * 100.0
-    ).numpy()
+    z_error = (z_error_sum / len(cases)).numpy()
+    q_error = (q_error_sum / len(cases)).numpy()
     x_km = x_values.cpu().numpy() / 1000.0
     t_hour = t_values.cpu().numpy() / 3600.0
 
@@ -125,14 +145,14 @@ def plot_error_contours(
     draw(
         axes[0],
         z_error,
-        "Water-depth relative error",
+        "Mean water-depth relative error across test cases",
         "Relative error (%)",
         "%.2f%%",
     )
     draw(
         axes[1],
         q_error,
-        "Discharge relative error",
+        "Mean discharge relative error across test cases",
         "Relative error (%)",
         "%.1f%%",
     )

@@ -15,23 +15,6 @@ ras_data_dir = (project_dir / config["paths"]["csv"]["ras_dir"]).resolve()
 geo_data_dir = (project_dir / config["paths"]["csv"]["geo_dir"]).resolve()
 max_geo_points = config["data"]["max_geo_points"]
 
-def sample_points(case, count):
-    """从一个工况随机抽取 count 个时空点。"""
-    ti = torch.randint(len(case["t"]), (count,))
-    xi = torch.randint(len(case["x"]), (count,))
-
-    return {
-        "x": case["x"][xi, None],
-        "t": case["t"][ti, None],
-        "ic": case["ic"][None].expand(count, -1),
-        "bc": case["bc"][None].expand(count, -1),
-        "geo": case["geo"][xi],
-        "geo_mask": case["geo_mask"][xi],
-        "z": case["z"][ti, xi, None],
-        "q": case["q"][ti, xi, None],
-        "manning_n": case["manning_n"].expand(count, 1),
-    }
-
 
 def calculate_normalization_scales(dataset):
     """基于训练集计算归一化参数"""

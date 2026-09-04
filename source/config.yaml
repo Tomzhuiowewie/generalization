@@ -27,7 +27,6 @@ loss_weights:
   momentum: 1.0e-6
 
 monitor:
-  case_count: 16
   time_step: 24
   time_batch: 24
   final_test_time_step: 1

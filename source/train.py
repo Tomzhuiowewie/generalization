@@ -4,7 +4,7 @@ from pathlib import Path
 import torch, math, yaml
 
 from loss import boundary_loss, initial_loss, pde_loss
-from utils.plot import plot_error_contours, plot_loss_history
+from utils.plot import plot_error_contours, plot_loss_history, plot_relative_error_history
 from networks import OperatorPINN
 
 config_path = Path(__file__).with_name("config.yaml")
@@ -12,51 +12,49 @@ with config_path.open("r", encoding="utf-8") as file:
     config = yaml.safe_load(file)
 project_dir = (config_path.parent / config["paths"]["project_dir"]).resolve()
 
-def configured_path(*keys):
-    value = config["paths"]
-    for key in keys:
-        value = value[key]
-    return (project_dir / value).resolve()
+def dataset_relative_error(model, cases, device, time_step=24, time_batch=24):
+    if not cases:
+        raise ValueError("cases cannot be empty")
 
-def relative_error(model, case, device, time_step=24, time_batch=24):
     was_training = model.training
     model.eval()
-    x = case["x"].to(device)
-    section_count = len(x)
-    geo = case["geo"].to(device)
-    geo_mask = case["geo_mask"].to(device)
-    bed = case["bed"].to(device)[:, None]
-    indices = torch.arange(0, len(case["t"]), time_step)
-    depth_error_sum = q_error_sum = 0.0
-    point_count = 0
+    dataset_depth_error = dataset_q_error = 0.0
 
     with torch.no_grad():
-        for start in range(0, len(indices), time_batch):
-            selected = indices[start:start + time_batch]
-            time_count = len(selected)
-            t = case["t"][selected].to(device)[:, None].expand(-1, section_count).reshape(-1, 1)
-            model_x = x[None].expand(time_count, -1).reshape(-1, 1)
-            ic = case["ic"].to(device)[None].expand(time_count * section_count, -1)
-            bc = case["bc"].to(device)[None].expand(time_count * section_count, -1)
-            model_geo = geo[None].expand(time_count, -1, -1, -1).reshape(time_count * section_count, geo.shape[1], 2)
-            model_geo_mask = geo_mask[None].expand(time_count, -1, -1).reshape(time_count * section_count, geo_mask.shape[1])
-            model_bed = bed[None].expand(time_count, -1, -1).reshape(-1, 1)
-            pred_z, pred_q = model(model_x, t, ic, bc, model_geo, model_geo_mask, model_bed)
-            true_z = case["z"][selected].to(device).reshape(-1, 1)
-            true_q = case["q"][selected].to(device).reshape(-1, 1)
-            true_depth = true_z - model_bed
-            depth_error_sum += ((pred_z - true_z).abs() / true_depth.abs().clamp_min(1e-6)).sum().item()
-            q_error_sum += ((pred_q - true_q).abs() / true_q.abs().clamp_min(1e-6)).sum().item()
-            point_count += true_z.numel()
+        for case in cases:
+            x = case["x"].to(device)
+            section_count = len(x)
+            geo = case["geo"].to(device)
+            geo_mask = case["geo_mask"].to(device)
+            bed = case["bed"].to(device)[:, None]
+            indices = torch.arange(0, len(case["t"]), time_step)
+            depth_error_sum = q_error_sum = 0.0
+            point_count = 0
+
+            for start in range(0, len(indices), time_batch):
+                selected = indices[start:start + time_batch]
+                time_count = len(selected)
+                t = case["t"][selected].to(device)[:, None].expand(-1, section_count).reshape(-1, 1)
+                model_x = x[None].expand(time_count, -1).reshape(-1, 1)
+                ic = case["ic"].to(device)[None].expand(time_count * section_count, -1)
+                bc = case["bc"].to(device)[None].expand(time_count * section_count, -1)
+                model_geo = geo[None].expand(time_count, -1, -1, -1).reshape(time_count * section_count, geo.shape[1], 2)
+                model_geo_mask = geo_mask[None].expand(time_count, -1, -1).reshape(time_count * section_count, geo_mask.shape[1])
+                model_bed = bed[None].expand(time_count, -1, -1).reshape(-1, 1)
+                pred_z, pred_q = model(model_x, t, ic, bc, model_geo, model_geo_mask, model_bed)
+                true_z = case["z"][selected].to(device).reshape(-1, 1)
+                true_q = case["q"][selected].to(device).reshape(-1, 1)
+                true_depth = true_z - model_bed
+                depth_error_sum += ((pred_z - true_z).abs() / true_depth.abs().clamp_min(1e-6)).sum().item()
+                q_error_sum += ((pred_q - true_q).abs() / true_q.abs().clamp_min(1e-6)).sum().item()
+                point_count += true_z.numel()
+
+            dataset_depth_error += 100 * depth_error_sum / point_count
+            dataset_q_error += 100 * q_error_sum / point_count
 
     if was_training:
         model.train()
-    return 100 * depth_error_sum / point_count, 100 * q_error_sum / point_count
-
-
-def dataset_relative_error(model, cases, device, time_step=24, time_batch=24):
-    errors = [relative_error(model, case, device, time_step, time_batch) for case in cases]
-    return sum(error[0] for error in errors) / len(errors), sum(error[1] for error in errors) / len(errors)
+    return dataset_depth_error / len(cases), dataset_q_error / len(cases)
 
 
 def train():
@@ -64,10 +62,12 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     print("device:", device)
 
-    # train_data = prepare_case("train")  # 训练集数据
-    train_data = torch.load(configured_path("pt", "train"), map_location="cpu", weights_only=True)
-    # normalization_scales = load_normalization_scales(train_data)   # 加载或计算归一化尺度
-    normalization_scales = torch.load(configured_path("pt", "normalization"), map_location="cpu", weights_only=True)
+    # 训练集数据
+    train_data = torch.load((project_dir / config["paths"]["pt"]["train"]).resolve(), map_location="cpu", weights_only=True)
+    validation_data = torch.load((project_dir / config["paths"]["pt"]["validation"]).resolve(), map_location="cpu", weights_only=True)
+    test_data = torch.load((project_dir / config["paths"]["pt"]["test"]).resolve(), map_location="cpu", weights_only=True)
+    # 加载或计算归一化尺度
+    normalization_scales = torch.load((project_dir / config["paths"]["pt"]["normalization"]).resolve(), map_location="cpu", weights_only=True)
 
     example_case = list(train_data.values())[0] #  确定数据结构的示例工况
     condition_dim = example_case["ic"].numel() + example_case["bc"].numel() # 计算(初始条件+边界条件)的维度
@@ -75,24 +75,15 @@ def train():
     model = OperatorPINN(condition_dim, normalization_scales).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["training"]["learning_rate"])
 
-    cases = list(train_data.values())
-    case_count = len(train_data)
+    cases, case_count = list(train_data.values()), len(train_data)
 
-    cases_per_batch, points_per_case  = 8, 512     # 每个 batch 选择几个工况, 每个工况采样多少个 PDE 点
+    cases_per_batch, points_per_case = config["training"]["cases_per_batch"], config["training"]["points_per_case"] # 每个 batch 选择几个工况, 每个工况采样多少个 PDE 点
     batch_count = math.ceil(case_count / cases_per_batch)   # 计算每个 epoch 的 batch 数量（方法向上取整）
-    cases_per_batch, points_per_case = config["training"]["cases_per_batch"], config["training"]["points_per_case"]
-    batch_count = math.ceil(case_count / cases_per_batch)
 
 
     history = {name: [] for name in ("ic_z", "ic_q", "bc_q", "bc_z", "mass", "momentum")}
 
-    validation_data = torch.load(configured_path("pt", "validation"), map_location="cpu", weights_only=True)
-    test_data = torch.load(configured_path("pt", "test"), map_location="cpu", weights_only=True)
-
     validation_cases = list(validation_data.values())
-    monitor_case_count = config["monitor"]["case_count"]
-    train_monitor_cases = [cases[index] for index in torch.linspace(0, len(cases) - 1, monitor_case_count).long()]
-    validation_monitor_cases = [validation_cases[index] for index in torch.linspace(0, len(validation_cases) - 1, monitor_case_count).long()]
     relative_history = {"train_depth": [], "train_q": [], "validation_depth": [], "validation_q": []}
 
     for epoch in range(1, config["training"]["epochs"] + 1):
@@ -143,7 +134,7 @@ def train():
             mass, momentum = mass / selected_count, momentum / selected_count
 
             if epoch <= config["training"]["pretrain_epochs"]:
-                loss = ic_z + ic_q + bc_q + bc_z # 前 3个 epoch：只训练初始条件和边界条件
+                loss = ic_z + ic_q + bc_q + bc_z # 只训练初始条件和边界条件
             else:
                 loss = (
                     ic_z + ic_q + bc_q + bc_z
@@ -176,8 +167,9 @@ def train():
             f"momentum={history['momentum'][-1]:.4e}"
         )
 
-        train_depth_error, train_q_error = dataset_relative_error(model, train_monitor_cases, device, config["monitor"]["time_step"], config["monitor"]["time_batch"])
-        validation_depth_error, validation_q_error = dataset_relative_error(model, validation_monitor_cases, device, config["monitor"]["time_step"], config["monitor"]["time_batch"])
+        train_depth_error, train_q_error = dataset_relative_error(model, cases, device, config["monitor"]["time_step"], config["monitor"]["time_batch"])
+        validation_depth_error, validation_q_error = dataset_relative_error(model, validation_cases, device, config["monitor"]["time_step"], config["monitor"]["time_batch"])
+
         relative_history["train_depth"].append(train_depth_error)
         relative_history["train_q"].append(train_q_error)
         relative_history["validation_depth"].append(validation_depth_error)
@@ -187,23 +179,28 @@ def train():
     test_depth_error, test_q_error = dataset_relative_error(model, list(test_data.values()), device, config["monitor"]["final_test_time_step"], config["monitor"]["time_batch"])
     print(f"final test relative error: depth={test_depth_error:.2f}%, q={test_q_error:.2f}%")
 
-    # 误差等值线
-    case_id, test_case = next(iter(test_data.items()))
+    # 训练集、验证集、测试集所有工况的逐点平均误差等值线
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    output_path = plot_error_contours(
-        model,
-        test_case,
-        device=device,
-        output_path=configured_path("figure_dir") / f"{case_id}_error_contours_{timestamp}.png",
-        levels=config["plot"]["contour_levels"],
-    )
+    contour_paths = {}
+    for split_name, dataset in (("train", train_data), ("validation", validation_data), ("test", test_data)):
+        contour_paths[split_name] = plot_error_contours(
+            model, list(dataset.values()), device=device,
+            output_path=(project_dir / config["paths"]["figure_dir"] / f"{split_name}_mean_error_contours_{timestamp}.png").resolve(),
+            levels=config["plot"]["contour_levels"],
+        )
 
     history_path = plot_loss_history(
         history,
-        output_path=configured_path("figure_dir") / f"{case_id}_loss_history_{timestamp}.png",
+        output_path=(project_dir / config["paths"]["figure_dir"] / f"training_loss_history_{timestamp}.png").resolve(),
     )
-    print(f"loss history saved: {history_path}\nerror contour saved: {output_path}")
+    relative_history_path = plot_relative_error_history(
+        relative_history,
+        output_path=(project_dir / config["paths"]["figure_dir"] / f"train_validation_relative_error_history_{timestamp}.png").resolve(),
+    )
+    print(f"loss history saved: {history_path}")
+    print(f"relative error history saved: {relative_history_path}")
+    for split_name, contour_path in contour_paths.items():
+        print(f"{split_name} error contour saved: {contour_path}")
 
 
 if __name__ == "__main__":

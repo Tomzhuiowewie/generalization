@@ -70,8 +70,7 @@ def boundary_loss(model, case):
 
 
 def pde_loss(
-    model,
-    x, t,
+    model, x, t,
     ic, bc, section_x, geometry, geometry_mask, bed,
     manning_n, gravity=9.81, debug=False
 ):
@@ -97,7 +96,6 @@ def pde_loss(
     radius = (area / perimeter).clamp_min(1e-6)  # 避免水力半径为零
 
     # Mass equation: ∂A/∂t + ∂Q/∂x = 0
-
     area_t = grad(area, t)  # 
     area_t_nd = (model.time_ref / model.area_ref) * area_t
 
@@ -111,7 +109,6 @@ def pde_loss(
     loss_mass_nd = mass_nd.square().mean()
 
     # Momentum equation: ∂Q/∂t + ∂(Q^2/A)/∂x + gA∂z/∂x + gA(Sf) = 0
-
     momentum_scale = model.area_ref * model.length_ref / model.q_ref.square()
 
     discharge_t = grad(discharge, t)
