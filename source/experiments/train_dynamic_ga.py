@@ -17,7 +17,7 @@ project_dir = (SOURCE / config["paths"]["project_dir"]).resolve()
 name = ("ic_z", "ic_q", "bc_q", "bc_z", "mass", "momentum")
 
 GA = {
-        "population": 8, "elite": 2, "interval": 3,
+        "population": 8, "elite": 2, "parent_pool": 4, "immigrants": 1, "interval": 5,
         "weight_sigma": .30, "lr_sigma": .3,
         "smooth": .4, "validation_cases": 4, "validation_points": 128
       }
@@ -42,10 +42,10 @@ def decode(g):
     return {n: 10. ** float(v) for n, v in zip(name, g[:6])}, 10. ** float(g[6])
 
 
-def mutate(g, rng):
+def mutate(g, rng, scale=1.):
     g = g.clone()
-    g[1:6] += torch.randn(5, generator=rng, dtype=torch.float64) * GA["weight_sigma"]
-    g[6] += torch.randn(1, generator=rng, dtype=torch.float64).item() * GA["lr_sigma"]
+    g[1:6] += torch.randn(5, generator=rng, dtype=torch.float64) * GA["weight_sigma"] * scale
+    g[6] += torch.randn(1, generator=rng, dtype=torch.float64).item() * GA["lr_sigma"] * scale
     return normalize_gene(g)
 
 
@@ -162,13 +162,17 @@ def new_individual(gene, state, scales, condition_dim, device, optimizer_state=N
 def evolve(population, scales, condition_dim, device, rng, py_rng):
     population.sort(key=lambda p: p["fitness"])
     elites = population[:GA["elite"]]
+    parents = population[:GA["parent_pool"]]
     children = elites[:]
-    while len(children) < GA["population"]:
-        a, b = py_rng.choice(elites), py_rng.choice(elites)
-        alpha = torch.rand(7, generator=rng, dtype=torch.float64)
-        proposal = mutate(alpha * a["gene"] + (1 - alpha) * b["gene"], rng)
-        gene = normalize_gene((1 - GA["smooth"]) * a["gene"] + GA["smooth"] * proposal)
-        children.append(new_individual(gene, a["model"].state_dict(), scales, condition_dim, device, a["optimizer"].state_dict()))
+    while len(children) < GA["population"] - GA["immigrants"]:
+        parent = py_rng.choice(parents)
+        proposal = mutate(parent["gene"], rng)
+        gene = normalize_gene((1 - GA["smooth"]) * parent["gene"] + GA["smooth"] * proposal)
+        children.append(new_individual(gene, parent["model"].state_dict(), scales, condition_dim, device, parent["optimizer"].state_dict()))
+
+    parent = py_rng.choice(parents)
+    gene = mutate(parent["gene"], rng, scale=2.)
+    children.append(new_individual(gene, parent["model"].state_dict(), scales, condition_dim, device, parent["optimizer"].state_dict()))
     return children
 
 
