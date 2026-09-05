@@ -10,12 +10,12 @@ def initialize_weights(module):
 
 
 class GeometryEncoder(nn.Module):
-    def __init__(self, geo_dim=32):
+    def __init__(self, geo_dim=64):
         super().__init__()
 
         self.point_net = nn.Sequential(
-            nn.Linear(2, 64), nn.Tanh(),
-            nn.Linear(64, geo_dim),
+            nn.Linear(2, 128), nn.Tanh(),
+            nn.Linear(128, geo_dim),
         )
 
     def forward(self, geo, mask):
