@@ -193,20 +193,6 @@ def history_row(epoch, rank, individual):
     return row
 
 
-def print_epoch(epoch, individual, validation=False):
-    train = individual["train"]
-    print(f"epoch={epoch:03d}, train={train[0]:.3e}")
-    print("  train: " + ", ".join(f"{key}={value:.2e}" for key, value in zip(name, train[1:])))
-
-    if validation:
-        weights, lr = decode(individual["gene"])
-        val = individual["metrics"]
-        val_loss = sum(weights[key] * val[i + 2] for i, key in enumerate(name))
-        print(f"  val: loss={val_loss:.3e}, depth={val[0]:.2f}%, q={val[1]:.2f}%, fitness={individual['fitness']:.3e}, lr={lr:.2e}")
-        print("  val components: " + ", ".join(f"{key}={value:.2e}" for key, value in zip(name, val[2:])))
-        print("  weights: " + ", ".join(f"{key}={weights[key]:.2e}" for key in name))
-
-
 def main():
     seed = config["training"]["seed"]
     torch.manual_seed(seed); py_rng = random.Random(seed); rng = torch.Generator().manual_seed(seed + 1)
@@ -223,17 +209,19 @@ def main():
     base = OperatorPINN(condition_dim, scales).to(device)
 
     base_state = copy.deepcopy(base.state_dict())
-    points = GA["validation_points"]
+    points = GA["validation_points"]    # 
 
     xt = torch.rand(points, 2, generator=torch.Generator().manual_seed(seed + 2)).to(device)
     x = example["x"][0].item() + xt[:, :1] * (example["x"][-1] - example["x"][0]).item()
     t = example["t"][0].item() + xt[:, 1:] * (example["t"][-1] - example["t"][0]).item()
     calibration_losses = [float(value.detach()) for value in
                           component_losses(base, cases[:GA["validation_cases"]], x, t, device)]
-    g0 = initial_gene(calibration_losses)
-    initial_weights, initial_lr = decode(g0)
-    print(f"initial losses={dict(zip(name, calibration_losses))}")
-    print(f"initial weights={initial_weights}, lr={initial_lr:.3e}")
+    g0 = initial_gene(calibration_losses)   # 
+
+    # initial_weights, initial_lr = decode(g0)
+    # initial_weights_for_print = ", ".join(f"{key}={value:.5e}" for key, value in initial_weights.items())
+    # print(f"initial losses={dict(zip(name, calibration_losses))}")
+    # print(f"initial weights={initial_weights_for_print}, lr={initial_lr:.3e}")
 
     reference = metrics(base, validation, x, t, device); population = []
     for i in range(GA["population"]):
@@ -277,12 +265,32 @@ def main():
 
         for key, value in zip(name, candidate["train"][1:]):
             history[key].append(value)
+
         train_error = relative_error(candidate["model"], cases, device, config["monitor"]["time_step"])
         validation_error = candidate["metrics"][:2] if validate else relative_error(candidate["model"], validation, device, config["monitor"]["time_step"])
+
         for key, value in zip(relative_history, (*train_error, *validation_error)):
             relative_history[key].append(value)
-        print_epoch(epoch, candidate, validation=validate)
-        print(f"  relative error: train_depth={train_error[0]:.2f}%, train_q={train_error[1]:.2f}%, validation_depth={validation_error[0]:.2f}%, validation_q={validation_error[1]:.2f}%")
+
+        train = candidate["train"]
+        print(
+            f"epoch={epoch:03d}, train={train[0]:.3e}, "
+            f"L2: train_depth={train_error[0]:.2f}%, "
+            f"train_q={train_error[1]:.2f}%, "
+            f"validation_depth={validation_error[0]:.2f}%, "
+            f"validation_q={validation_error[1]:.2f}%"
+        )
+        # print("  train: " + ", ".join(f"{key}={value:.2e}" for key, value in zip(name, train[1:])))
+
+        if validate:
+            weights, lr = decode(candidate["gene"])
+            val = candidate["metrics"]
+            val_loss = sum(weights[key] * val[i + 2] for i, key in enumerate(name))
+            print(f"           val: loss={val_loss:.3e}, depth={val[0]:.2f}%, q={val[1]:.2f}%, fitness={candidate['fitness']:.3e}, lr={lr:.2e}")
+            print("           val components: " + ", ".join(f"{key}={value:.2e}" for key, value in zip(name, val[2:])))
+            print("           weights: " + ", ".join(f"{key}={weights[key]:.2e}" for key in name))
+
+
         if validate and early_stopping.step(candidate["fitness"]):
             print(f"early stop: epoch={epoch:03d}, best_epoch={best_checkpoint['epoch']:03d}, best_fitness={best_fitness:.3e}")
             break

@@ -85,7 +85,7 @@ def pde_loss(
     geo_mask = torch.cat([geometry_mask[left], geometry_mask[right]], dim=1)
 
     water_level, discharge = model(
-        x, t, ic, bc, geo, geo_mask, bed_at_x, debug=debug
+        x, t, ic, bc, geo, geo_mask, bed_at_x
     )
 
     area, perimeter = water_area_at_x(

@@ -79,6 +79,7 @@ class OperatorPINN(nn.Module):
         # ic = [初始水位, 初始流量]，bc = [上游流量, 下游水位]，水位与流量分别使用各自的统计量归一化。
         ic_z, ic_q = torch.chunk(ic, 2, dim=-1)
         bc_q, bc_z = torch.chunk(bc, 2, dim=-1)
+
         ic_net = torch.cat([
             (ic_z - self.z_mean) / self.z_std,
             (ic_q - self.q_mean) / self.q_std,
