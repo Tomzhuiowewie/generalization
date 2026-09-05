@@ -8,14 +8,14 @@ paths:
     validation: 'data/pt/validation_prepared.pt'
     test: 'data/pt/test_prepared.pt'
     normalization: 'data/pt/normalization_scales.pt'
-  figure_dir: 'figures'
+  figure_dir: 'outputs'
 
 data:
   max_geo_points: 481
 
 training:
   seed: 2032
-  epochs: 100
+  epochs: 30
   pretrain_epochs: 0
   learning_rate: 1.0e-3
   cases_per_batch: 8

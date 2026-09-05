@@ -6,11 +6,13 @@ import torch, math, yaml
 from loss import boundary_loss, initial_loss, pde_loss
 from utils.plot import plot_error_contours, plot_loss_history, plot_relative_error_history
 from networks import OperatorPINN
+from utils.common import sample_cases, EarlyStopping
 
 config_path = Path(__file__).with_name("config.yaml")
 with config_path.open("r", encoding="utf-8") as file:
     config = yaml.safe_load(file)
 project_dir = (config_path.parent / config["paths"]["project_dir"]).resolve()
+
 
 def dataset_relative_error(model, cases, device, time_step=24, time_batch=24):
     if not cases:
@@ -69,6 +71,12 @@ def train():
     # 加载或计算归一化尺度
     normalization_scales = torch.load((project_dir / config["paths"]["pt"]["normalization"]).resolve(), map_location="cpu", weights_only=True)
 
+    # 采样少部分数据用于测试不同方法
+    train_data = sample_cases(train_data, 105)
+    validation_data = sample_cases(validation_data, 30)
+    test_data = sample_cases(test_data, 15)
+
+
     example_case = list(train_data.values())[0] #  确定数据结构的示例工况
     condition_dim = example_case["ic"].numel() + example_case["bc"].numel() # 计算(初始条件+边界条件)的维度
 
@@ -85,6 +93,8 @@ def train():
 
     validation_cases = list(validation_data.values())
     relative_history = {"train_depth": [], "train_q": [], "validation_depth": [], "validation_q": []}
+    early_stopping = EarlyStopping(patience=5, min_delta=1e-3)
+    best_error = math.inf
 
     for epoch in range(1, config["training"]["epochs"] + 1):
 
@@ -176,6 +186,15 @@ def train():
         relative_history["validation_q"].append(validation_q_error)
         print(f"relative error: train_depth={train_depth_error:.2f}%, train_q={train_q_error:.2f}%, validation_depth={validation_depth_error:.2f}%, validation_q={validation_q_error:.2f}%")
 
+        validation_error = (validation_depth_error + validation_q_error) / 2
+        if validation_error < best_error:
+            best_error, best_epoch = validation_error, epoch
+            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+        if early_stopping.step(validation_error):
+            print(f"early stop: epoch={epoch:03d}, best_epoch={best_epoch:03d}, best_validation_error={best_error:.4f}%")
+            break
+
+    model.load_state_dict(best_state)
     test_depth_error, test_q_error = dataset_relative_error(model, list(test_data.values()), device, config["monitor"]["final_test_time_step"], config["monitor"]["time_batch"])
     print(f"final test relative error: depth={test_depth_error:.2f}%, q={test_q_error:.2f}%")
 

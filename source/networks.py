@@ -2,12 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def initialize_weights(self):
-    for module in self.modules():
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=1.0)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
+def initialize_weights(module):
+    if isinstance(module, nn.Linear):
+        nn.init.xavier_uniform_(module.weight, gain=1.0)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
 
 
 class GeometryEncoder(nn.Module):
@@ -63,15 +62,13 @@ class OperatorPINN(nn.Module):
 
         # 水深（水位）输出头
         self.z_head = nn.Linear(64, 1)
-
         # 流量输出头
         self.q_head = nn.Linear(64, 1)
 
         self.apply(initialize_weights)
 
 
-    def forward(self, x, t, ic, bc, geo, geo_mask, bed, debug=False):
-
+    def forward(self, x, t, ic, bc, geo, geo_mask, bed):
         # 坐标和时间映射到 [-1, 1] 区间
         x_range = (self.x_max - self.x_min).clamp_min(1e-6)
         t_range = (self.t_max - self.t_min).clamp_min(1e-6)
@@ -79,8 +76,7 @@ class OperatorPINN(nn.Module):
         x_net = (x - self.x_min) / x_range * 2.0 - 1.0
         t_net = (t - self.t_min) / t_range * 2.0 - 1.0
 
-        # ic = [初始水位, 初始流量]，bc = [上游流量, 下游水位]
-        # 水位与流量分别使用各自的统计量归一化。
+        # ic = [初始水位, 初始流量]，bc = [上游流量, 下游水位]，水位与流量分别使用各自的统计量归一化。
         ic_z, ic_q = torch.chunk(ic, 2, dim=-1)
         bc_q, bc_z = torch.chunk(bc, 2, dim=-1)
         ic_net = torch.cat([
@@ -111,20 +107,6 @@ class OperatorPINN(nn.Module):
 
         raw_depth = self.z_head(shared_feature)
         raw_q = self.q_head(shared_feature)
-
-        if debug:
-            print(
-                "raw_q:",
-                "min =", raw_q.min().item(),
-                "max =", raw_q.max().item(),
-                "mean =", raw_q.mean().item(),
-                "std =", raw_q.std(unbiased=False).item(),
-            )
-
-            print(
-                "q_mean =", self.q_mean.item(),
-                "q_std =", self.q_std.item(),
-            )
 
         depth = self.depth_mean * F.softplus(raw_depth)  # softplus 保证深度为正
         z = bed + depth
