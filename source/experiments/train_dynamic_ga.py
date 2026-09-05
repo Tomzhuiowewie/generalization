@@ -19,8 +19,7 @@ project_dir = (SOURCE / config["paths"]["project_dir"]).resolve()
 name = ("ic_z", "ic_q", "bc_q", "bc_z", "mass", "momentum")
 GA = {
         "population": 4, "elite": 1, "parent_pool": 2, "immigrants": 1, "interval": 5,
-        "weight_sigma": .30, "lr_sigma": .3,
-        "smooth": .4, "validation_cases": 4, "validation_points": 128
+        "weight_sigma": .30, "lr_sigma": .3, "smooth": .4, "validation_cases": 4, "validation_points": 128
       }
 
 # 初始化权重
