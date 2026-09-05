@@ -284,8 +284,7 @@ def main():
         if validate:
             weights, lr = decode(candidate["gene"])
             val = candidate["metrics"]
-            val_loss = sum(weights[key] * val[i + 2] for i, key in enumerate(name))
-            print(f"           val: loss={val_loss:.3e}, depth={val[0]:.2f}%, q={val[1]:.2f}%, fitness={candidate['fitness']:.3e}, lr={lr:.2e}")
+            print(f"           fitness={candidate['fitness']:.3e}, lr={lr:.2e}")
             print("           val components: " + ", ".join(f"{key}={value:.2e}" for key, value in zip(name, val[2:])))
             print("           weights: " + ", ".join(f"{key}={weights[key]:.2e}" for key in name))
 

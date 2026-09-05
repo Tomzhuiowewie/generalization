@@ -70,8 +70,7 @@ def boundary_loss(model, case):
 
 
 def pde_loss(
-    model, x, t,
-    ic, bc, section_x, geometry, geometry_mask, bed,
+    model, x, t, ic, bc, section_x, geometry, geometry_mask, bed,
     manning_n, gravity=9.81, debug=False
 ):
     x = x.detach().clone().requires_grad_(True)
@@ -80,12 +79,14 @@ def pde_loss(
     right = torch.searchsorted(section_x, x[:, 0]).clamp(1, len(section_x) - 1)
     left = right - 1
     weight = (x[:, 0] - section_x[left]) / (section_x[right] - section_x[left])
+
     bed_at_x = ((1 - weight) * bed[left] + weight * bed[right]).unsqueeze(-1)
     geo = torch.cat([geometry[left], geometry[right]], dim=1)
     geo_mask = torch.cat([geometry_mask[left], geometry_mask[right]], dim=1)
 
+    # 计算水位、流量
     water_level, discharge = model(
-        x, t, ic, bc, geo, geo_mask, bed_at_x
+        x, t, ic, bc, geo, geo_mask, bed_at_x, geo_weight=weight[:, None],
     )
 
     area, perimeter = water_area_at_x(

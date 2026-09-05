@@ -68,7 +68,7 @@ class OperatorPINN(nn.Module):
         self.apply(initialize_weights)
 
 
-    def forward(self, x, t, ic, bc, geo, geo_mask, bed):
+    def forward(self, x, t, ic, bc, geo, geo_mask, bed, geo_weight=None):
         # 坐标和时间映射到 [-1, 1] 区间
         x_range = (self.x_max - self.x_min).clamp_min(1e-6)
         t_range = (self.t_max - self.t_min).clamp_min(1e-6)
@@ -99,7 +99,14 @@ class OperatorPINN(nn.Module):
 
         # 三个编码分支统一使用模型内部生成的归一化输入。
         condition_code = self.condition_branch(torch.cat([ic_net, bc_net], dim=-1))
-        geo_code = self.geo_branch(geo_net, geo_mask)
+        if geo_weight is None:   # 单断面
+            geo_code = self.geo_branch(geo_net, geo_mask)  
+        else:   # PDE点预测
+            left_geo, right_geo = geo_net.chunk(2, dim=1)
+            left_mask, right_mask = geo_mask.chunk(2, dim=1)
+            left_code = self.geo_branch(left_geo, left_mask)
+            right_code = self.geo_branch(right_geo, right_mask)
+            geo_code = (1 - geo_weight) * left_code + geo_weight * right_code
         trunk_code = self.trunk(torch.cat([x_net, t_net], dim=-1))
 
         shared_feature = self.shared_head(
