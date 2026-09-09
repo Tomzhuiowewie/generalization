@@ -10,7 +10,7 @@ config_path = Path(__file__).with_name("config.yaml")
 with config_path.open("r", encoding="utf-8") as file:
     config = yaml.safe_load(file)
 
-project_dir = (config_path.parent / config["paths"]["project_dir"]).resolve()
+project_dir = config_path.parent.parent.resolve()
 ras_data_dir = (project_dir / config["paths"]["csv"]["ras_dir"]).resolve()
 geo_data_dir = (project_dir / config["paths"]["csv"]["geo_dir"]).resolve()
 max_geo_points = config["data"]["max_geo_points"]

@@ -1,5 +1,4 @@
 paths:
-  project_dir: '..'
   csv:
     ras_dir: 'data/csv/ras'
     geo_dir: 'data/csv/geo'
@@ -8,7 +7,7 @@ paths:
     validation: 'data/pt/validation_prepared.pt'
     test: 'data/pt/test_prepared.pt'
     normalization: 'data/pt/normalization_scales.pt'
-  figure_dir: 'outputs'
+  figure_dir: 'out'
 
 data:
   max_geo_points: 481
@@ -33,3 +32,17 @@ monitor:
 
 plot:
   contour_levels: 8
+
+fvm2:
+  seed: 2032
+  epochs: 100
+  cases_per_batch: 4
+  points_per_case: 64 # 采样点
+  num_threads: 4
+  manning_n: 0.020816
+  learning_rate: 1.0e-3
+  min_learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  output_path: '../out/train_fvm'
+  val_time_step: 24
+  val_time_batch: 6

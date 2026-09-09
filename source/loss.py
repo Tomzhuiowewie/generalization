@@ -1,12 +1,6 @@
 import torch
 from utils.geometry import water_area_at_x
-
-
-def grad(y, x):
-
-    return torch.autograd.grad(
-        y, x, grad_outputs=torch.ones_like(y), create_graph=True
-        )[0]
+from utils.common import grad
 
 
 def initial_loss(model, case):
@@ -14,12 +8,11 @@ def initial_loss(model, case):
     device = next(model.parameters()).device    # 获取模型所在的设备
     x = case["x"].to(device)[:, None]   # 额外增加一个维度，变为 (N, 1)
     t = torch.full_like(x, case["t"][0].item())
-    count = len(x)
 
     pred_z, pred_q = model(
         x, t,
-        case["ic"].to(device)[None].repeat(count, 1), # [92,184] 184 = 92 * 2(初始水位、初始流量)
-        case["bc"].to(device)[None].repeat(count, 1),   # [92,1346] 1346 = 673 * 2(上游流量、下游水位)
+        case["ic"].to(device)[None].repeat(len(x), 1), # [92,184] 184 = 92 * 2(初始水位、初始流量)
+        case["bc"].to(device)[None].repeat(len(x), 1),   # [92,1346] 1346 = 673 * 2(上游流量、下游水位)
         case["geo"].to(device),
         case["geo_mask"].to(device),
         case["bed"].to(device)[:, None],
@@ -36,7 +29,13 @@ def initial_loss(model, case):
 
 
 def boundary_loss(model, case):
-    """边界条件：约束上游流量和下游水位过程"""
+    """边界条件：约束两端流量和水位过程。
+
+    The boundary observations already present in ``case["q"]`` and
+    ``case["z"]`` are used at both section endpoints.  This keeps the loss
+    data source unchanged while making both Q and Z boundary conditions
+    two-sided.
+    """
     device = next(model.parameters()).device
     t = case["t"].to(device)[:, None]
     count = len(t)
@@ -44,7 +43,7 @@ def boundary_loss(model, case):
     bc = case["bc"].to(device)[None].repeat(count, 1)
 
     x_up = torch.full_like(t, case["x"][0].item())
-    _, pred_q_up = model(
+    pred_z_up, pred_q_up = model(
         x_up, t, ic, bc,
         case["geo"].to(device)[0:1].repeat(count, 1, 1),
         case["geo_mask"].to(device)[0:1].repeat(count, 1),
@@ -52,19 +51,29 @@ def boundary_loss(model, case):
     )
 
     x_down = torch.full_like(t, case["x"][-1].item())
-    pred_z_down, _ = model(
+    pred_z_down, pred_q_down = model(
         x_down, t, ic, bc,
         case["geo"].to(device)[-1:].repeat(count, 1, 1),
         case["geo_mask"].to(device)[-1:].repeat(count, 1),
         case["bed"].to(device)[-1:].repeat(count, 1),
     )
 
-    true_q_up = case["q"].to(device)[:, 0, None]
-    true_z_down = case["z"].to(device)[:, -1, None]
+    true_q = case["q"].to(device)
+    true_z = case["z"].to(device)
+    true_q_up = true_q[:, 0, None]
+    true_q_down = true_q[:, -1, None]
+    true_z_up = true_z[:, 0, None]
+    true_z_down = true_z[:, -1, None]
 
     # 无量纲化/标准化残差
-    q_residual = (pred_q_up - true_q_up) / model.q_std
-    z_residual = (pred_z_down - true_z_down) / model.z_std
+    q_residual = torch.cat([
+        (pred_q_up - true_q_up) / model.q_std,
+        (pred_q_down - true_q_down) / model.q_std,
+    ], dim=0)
+    z_residual = torch.cat([
+        (pred_z_up - true_z_up) / model.z_std,
+        (pred_z_down - true_z_down) / model.z_std,
+    ], dim=0)
 
     return torch.mean(q_residual**2), torch.mean(z_residual**2)
 

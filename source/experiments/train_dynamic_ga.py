@@ -10,24 +10,30 @@ from loss import boundary_loss, initial_loss, pde_loss
 from networks import OperatorPINN
 from utils.common import sample_cases, EarlyStopping
 from utils.plot import plot_error_contours, plot_loss_history, plot_relative_error_history
+from utils.common import relative_error, sample_cases
 
 with (SOURCE / "config.yaml").open(encoding="utf-8") as f: 
     config = yaml.safe_load(f)
 
-project_dir = (SOURCE / config["paths"]["project_dir"]).resolve()
+project_dir = SOURCE.parent.resolve()
 
 name = ("ic_z", "ic_q", "bc_q", "bc_z", "mass", "momentum")
 GA = {
-        "population": 4, "elite": 1, "parent_pool": 2, "immigrants": 1, "interval": 5,
-        "weight_sigma": .30, "lr_sigma": .3, "smooth": .4, "validation_cases": 4, "validation_points": 128
+    "population": 4, "elite": 1, "parent_pool": 2, "immigrants": 1, "interval": 5,
+    "weight_sigma": .30, "lr_sigma": .3, "smooth": .4, "initWeight_cases": 3, "validation_points": 128
       }
 
-# 初始化权重
+
 def initial_gene(losses):
-    reference_loss = max(losses[0], 1e-12)
-    weights = [reference_loss / max(value, 1e-12) for value in losses]
-    g = torch.tensor([math.log10(value) for value in weights]
-                     + [math.log10(config["training"]["learning_rate"])], dtype=torch.float64)
+    # 初始条件已由输出公式满足；校准边界和 PDE 四项
+    weights = [1.0, 1.0] + [
+        1.0 / max(value, 1e-12) for value in losses[2:]
+    ]
+    g = torch.tensor(
+        [math.log10(value) for value in weights]
+        + [math.log10(config["training"]["learning_rate"])],
+        dtype=torch.float64,
+    )
     return normalize_gene(g)
 
 # 设置搜索上下限
@@ -50,7 +56,7 @@ def mutate(g, rng, scale=1.):
     g[6] += torch.randn(1, generator=rng, dtype=torch.float64).item() * GA["lr_sigma"] * scale
     return normalize_gene(g)
 
-
+# 损失项计算
 def component_losses(model, cases, x, t, device):
     values = [torch.zeros((), device=device) for _ in name]
     for case in cases:
@@ -99,46 +105,10 @@ def train_epoch(individual, cases, example, device, epoch):
     return [value / len(cases) for value in totals]
 
 
-def relative_error(model, cases, device, time_step):
-    was_training = model.training
-    model.eval()
-    depth_total = q_total = 0.
-    with torch.no_grad():
-        for case in cases:
-            x, bed = case["x"].to(device), case["bed"].to(device)[:, None]
-            geo, mask = case["geo"].to(device), case["geo_mask"].to(device)
-            indices = torch.arange(0, len(case["t"]), time_step)
-            depth_sum = q_sum = count = 0.
-
-            for start in range(0, len(indices), config["monitor"]["time_batch"]):
-                selected = indices[start:start + config["monitor"]["time_batch"]]
-                nt, nx = len(selected), len(x)
-                t = case["t"][selected].to(device)[:, None].expand(-1, nx).reshape(-1, 1)
-                mx = x[None].expand(nt, -1).reshape(-1, 1)
-                ic = case["ic"].to(device)[None].expand(nt * nx, -1)
-                bc = case["bc"].to(device)[None].expand(nt * nx, -1)
-                mg = geo[None].expand(nt, -1, -1, -1).reshape(nt * nx, geo.shape[1], 2)
-                mm = mask[None].expand(nt, -1, -1).reshape(nt * nx, mask.shape[1])
-                mb = bed[None].expand(nt, -1, -1).reshape(-1, 1)
-
-                z, q = model(mx, t, ic, bc, mg, mm, mb)
-                true_z = case["z"][selected].to(device).reshape(-1, 1)
-                true_q = case["q"][selected].to(device).reshape(-1, 1)
-
-                depth_sum += ((z - true_z).abs() / (true_z - mb).abs().clamp_min(1e-6)).sum().item()
-                q_sum += ((q - true_q).abs() / true_q.abs().clamp_min(1e-6)).sum().item()
-                count += true_z.numel()
-
-            depth_total += 100 * depth_sum / count
-            q_total += 100 * q_sum / count
-
-    model.train(was_training)
-    return depth_total / len(cases), q_total / len(cases)
-
 
 def metrics(model, validation, x, t, device):
-    depth, q = relative_error(model, validation, device, config["monitor"]["time_step"])
-    losses = component_losses(model, validation[:GA["validation_cases"]], x, t, device)
+    depth, q = relative_error(model, validation, config["monitor"]["time_step"], config["monitor"]["time_batch"])
+    losses = component_losses(model, validation[:GA["initWeight_cases"]], x, t, device)
     return [depth, q] + [float(v.detach()) for v in losses]
 
 
@@ -202,25 +172,19 @@ def main():
     # 采样少部分数据用于测试不同方法
     train_data, validation_data, test_data = sample_cases(train_data, 105), sample_cases(validation_data, 30), sample_cases(test_data, 15)
 
-    cases, validation = list(train_data.values()), list(validation_data.values())
-    example = cases[0]
+    train_cases, validation = list(train_data.values()), list(validation_data.values())
+    example = train_cases[0]
     condition_dim = example["ic"].numel() + example["bc"].numel()
-    base = OperatorPINN(condition_dim, scales).to(device)
 
+    base = OperatorPINN(condition_dim, scales).to(device)   # 初始化模型
     base_state = copy.deepcopy(base.state_dict())
-    points = GA["validation_points"]    # 
 
-    xt = torch.rand(points, 2, generator=torch.Generator().manual_seed(seed + 2)).to(device)
+    xt = torch.rand(GA["validation_points"], 2, generator=torch.Generator().manual_seed(seed + 2)).to(device)
     x = example["x"][0].item() + xt[:, :1] * (example["x"][-1] - example["x"][0]).item()
     t = example["t"][0].item() + xt[:, 1:] * (example["t"][-1] - example["t"][0]).item()
-    calibration_losses = [float(value.detach()) for value in
-                          component_losses(base, cases[:GA["validation_cases"]], x, t, device)]
-    g0 = initial_gene(calibration_losses)   # 
 
-    # initial_weights, initial_lr = decode(g0)
-    # initial_weights_for_print = ", ".join(f"{key}={value:.5e}" for key, value in initial_weights.items())
-    # print(f"initial losses={dict(zip(name, calibration_losses))}")
-    # print(f"initial weights={initial_weights_for_print}, lr={initial_lr:.3e}")
+    init_loss = component_losses(base, train_cases[:GA["initWeight_cases"]], x, t, device)  # 计算各个损失项的初始值大小
+    g0 = initial_gene([float(value.detach()) for value in init_loss] )   # 生成初始权重
 
     reference = metrics(base, validation, x, t, device); population = []
     for i in range(GA["population"]):
@@ -239,7 +203,7 @@ def main():
     for epoch in range(1, config["training"]["epochs"] + 1):
         for individual in population:
             torch.manual_seed(seed + epoch)
-            individual["train"] = train_epoch(individual, cases, example, device, epoch)    # 每个个体训练
+            individual["train"] = train_epoch(individual, train_cases, example, device, epoch)    # 每个个体训练
         validate = epoch % GA["interval"] == 0 or epoch == config["training"]["epochs"]
         if validate:
             for individual in population:
@@ -265,8 +229,8 @@ def main():
         for key, value in zip(name, candidate["train"][1:]):
             history[key].append(value)
 
-        train_error = relative_error(candidate["model"], cases, device, config["monitor"]["time_step"])
-        validation_error = candidate["metrics"][:2] if validate else relative_error(candidate["model"], validation, device, config["monitor"]["time_step"])
+        train_error = relative_error(candidate["model"], train_cases, config["monitor"]["time_step"], config["monitor"]["time_batch"])
+        validation_error = candidate["metrics"][:2] if validate else relative_error(candidate["model"], validation, config["monitor"]["time_step"], config["monitor"]["time_batch"])
 
         for key, value in zip(relative_history, (*train_error, *validation_error)):
             relative_history[key].append(value)
@@ -297,7 +261,7 @@ def main():
 
     best_model = population[0]["model"]
     best_model.load_state_dict(best_checkpoint["model_state_dict"])
-    test = relative_error(best_model, list(test_data.values()), device, config["monitor"]["final_test_time_step"])
+    test = relative_error(best_model, list(test_data.values()), config["monitor"]["final_test_time_step"], config["monitor"]["time_batch"])
     csv_path = output / f"dynamic_ga_history_{stamp}.csv"
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -313,6 +277,7 @@ def main():
     relative_history_path = plot_relative_error_history(relative_history, output / f"dynamic_ga_train_validation_relative_error_history_{stamp}.png")
     print(f"loss history saved: {history_path}")
     print(f"relative error history saved: {relative_history_path}")
+
     for split_name, dataset in (("train", train_data), ("validation", validation_data), ("test", test_data)):
         contour_path = plot_error_contours(best_model, list(dataset.values()), device=device,
             output_path=output / f"dynamic_ga_{split_name}_mean_error_contours_{stamp}.png", levels=config["plot"]["contour_levels"])

@@ -11,7 +11,7 @@ from utils.common import sample_cases, EarlyStopping
 config_path = Path(__file__).with_name("config.yaml")
 with config_path.open("r", encoding="utf-8") as file:
     config = yaml.safe_load(file)
-project_dir = (config_path.parent / config["paths"]["project_dir"]).resolve()
+project_dir = config_path.parent.parent.resolve()
 
 
 def dataset_relative_error(model, cases, device, time_step=24, time_batch=24):

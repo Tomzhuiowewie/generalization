@@ -2,7 +2,7 @@
 /data/
 /figures/
 /runs/
-/outputs/
+/out/
 /checkpoints/
 /logs/
 
@@ -34,3 +34,6 @@ Thumbs.db
 
 # Ignore specific files or directories
 wuda_river1d
+codex
+*.png
+*.csv
