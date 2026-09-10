@@ -35,13 +35,13 @@ plot:
 
 fvm2:
   seed: 2032
-  epochs: 151
+  epochs: 200
   cases_per_batch: 8
   points_per_case: 64 # 采样点
   num_threads: 4
   manning_n: 0.020816
   learning_rate: 1.0e-3
-  min_learning_rate: 1.0e-4
+  min_learning_rate: 2.0e-4
   weight_decay: 1.0e-5
   output_path: '../out/train_fvm'
   val_time_step: 24
