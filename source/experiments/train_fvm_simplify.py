@@ -27,41 +27,151 @@ def mlp(*widths):
             layers.append(nn.Tanh())
     return nn.Sequential(*layers)
 
-class TemporalEncoder(nn.Module):
-    """边界编码：上游流量/下游水位
-    1. 一个描述整条序列的全局向量; 
-    2. 64 个保留时间局部特征的 token"""
+class WaveletTemporalEncoder(nn.Module):
+    """边界条件编码：原始时间卷积与两层固定 Haar 小波的门控融合。"""
 
     def __init__(self):
         super().__init__()
-        self.conv = nn.Sequential(
+        self.raw_map = nn.Sequential(
             nn.Conv1d(1, 16, 7, padding=3), nn.Tanh(),
-            nn.Conv1d(16, 32, 9, 2, 4), nn.Tanh(), 
-            nn.Conv1d(32, 32, 15, padding=7), nn.Tanh(), 
-            nn.Conv1d(32, 32, 7, padding=3), nn.Tanh()
+            nn.Conv1d(16, 32, 5, padding=2), nn.Tanh(),
+        )
+        self.wavelet_map = nn.Sequential(
+            nn.Conv1d(3, 16, 5, padding=2), nn.Tanh(),
+            nn.Conv1d(16, 32, 3, padding=1), nn.Tanh(),
+        )
+        self.gate = nn.Parameter(torch.zeros(1, 32, 1))
+        self.output = nn.Sequential(
+            nn.Conv1d(32, 32, 3, padding=1), nn.Tanh()
         )
         self.attention = nn.Conv1d(32, 1, 1)
         self.global_map = mlp(160, 64, 32)
         self.token_map = mlp(64, 32, 32)
         self.register_buffer("positions", torch.linspace(-1, 1, 64)[:, None])
 
+    @staticmethod
+    def haar(signal):
+        if signal.shape[-1] % 2:
+            signal = F.pad(signal, (0, 1), mode="replicate")
+        even, odd = signal[..., 0::2], signal[..., 1::2]
+        scale = math.sqrt(0.5)
+        return (even + odd) * scale, (even - odd) * scale
+
     def forward(self, sequence):
-        # 卷积提取时间特征
-        feature = self.conv(sequence.unsqueeze(1))
-        # 全局编码
+        signal = sequence.unsqueeze(1)
+        approx1, detail1 = self.haar(signal)
+        approx2, detail2 = self.haar(approx1)
+        length = signal.shape[-1]
+        bands = torch.cat((
+            F.interpolate(approx2, size=length, mode="linear", align_corners=False),
+            F.interpolate(detail2, size=length, mode="linear", align_corners=False),
+            F.interpolate(detail1, size=length, mode="linear", align_corners=False),
+        ), 1)
+
+        raw_feature = self.raw_map(signal)
+        wavelet_feature = self.wavelet_map(bands)
+        feature = self.output(
+            raw_feature + torch.sigmoid(self.gate) * wavelet_feature
+        )
+
         weight = torch.softmax(self.attention(feature), -1)
         summary = torch.cat((
-            (feature * weight).sum(-1),         # 注意力加权特征
-            feature.mean(-1), feature.amax(-1), # 时间平均特征
-            feature[..., 0],                    # 起始时刻特征
-            feature[..., -1]                    # 结束时刻特征
+            (feature * weight).sum(-1),
+            feature.mean(-1), feature.amax(-1),
+            feature[..., 0], feature[..., -1],
         ), -1)
-        # 局部时间token
         tokens = torch.cat((
-            F.adaptive_avg_pool1d(feature, 64), 
-            F.adaptive_max_pool1d(feature, 64)
+            F.adaptive_avg_pool1d(feature, 64),
+            F.adaptive_max_pool1d(feature, 64),
         ), 1).transpose(1, 2)
+        return self.global_map(summary), self.token_map(tokens)
 
+class CoordinateSpatialEncoder(nn.Module):
+    """初始条件编码：显式使用不规则空间坐标和相邻断面间距。"""
+
+    def __init__(self, source_x, token_count=64):
+        super().__init__()
+        source_x = source_x.float()
+        length = (source_x[-1] - source_x[0]).clamp_min(1e-6)
+        xn = 2 * (source_x - source_x[0]) / length - 1
+        gaps = source_x[1:] - source_x[:-1]
+        mean_gap = gaps.mean().clamp_min(1e-6)
+        left_gap = torch.cat((gaps[:1], gaps)) / mean_gap
+        right_gap = torch.cat((gaps, gaps[-1:])) / mean_gap
+
+        target_x = torch.linspace(source_x[0], source_x[-1], token_count)
+        right = torch.searchsorted(source_x, target_x).clamp(1, len(source_x) - 1)
+        left = right - 1
+        token_weight = (
+            (target_x - source_x[left])
+            / (source_x[right] - source_x[left]).clamp_min(1e-6)
+        )
+
+        cell_width = torch.empty_like(source_x)
+        cell_width[0] = gaps[0] / 2
+        cell_width[-1] = gaps[-1] / 2
+        cell_width[1:-1] = (source_x[2:] - source_x[:-2]) / 2
+
+        self.register_buffer("xn", xn)
+        self.register_buffer("left_gap", left_gap)
+        self.register_buffer("right_gap", right_gap)
+        self.register_buffer("token_left", left)
+        self.register_buffer("token_right", right)
+        self.register_buffer("token_weight", token_weight)
+        self.register_buffer("cell_weight", cell_width / cell_width.sum())
+        self.register_buffer("positions", torch.linspace(-1, 1, token_count)[:, None])
+
+        self.point_map = nn.Sequential(
+            nn.Linear(4, 64), nn.Tanh(),
+            nn.Linear(64, 32), nn.Tanh(),
+        )
+        self.updates = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(96, 64), nn.Tanh(),
+                nn.Linear(64, 32), nn.Tanh(),
+            )
+            for _ in range(2)
+        ])
+        self.attention = nn.Linear(32, 1)
+        self.global_map = mlp(160, 64, 32)
+        self.token_map = mlp(32, 32, 32)
+
+    def forward(self, sequence):
+        batch = sequence.shape[0]
+        point_input = torch.stack((
+            sequence,
+            self.xn.expand(batch, -1),
+            self.left_gap.log().expand(batch, -1),
+            self.right_gap.log().expand(batch, -1),
+        ), -1)
+        feature = self.point_map(point_input)
+
+        for update in self.updates:
+            left = torch.cat((feature[:, :1], feature[:, :-1]), 1)
+            right = torch.cat((feature[:, 1:], feature[:, -1:]), 1)
+            left_slope = (feature - left) / self.left_gap[None, :, None]
+            right_slope = (right - feature) / self.right_gap[None, :, None]
+            feature = feature + update(
+                torch.cat((feature, left_slope, right_slope), -1)
+            )
+
+        spatial_weight = self.cell_weight[None, :, None]
+        attention = torch.softmax(
+            self.attention(feature)
+            + spatial_weight.clamp_min(1e-12).log(),
+            1,
+        )
+        summary = torch.cat((
+            (feature * attention).sum(1),
+            (feature * spatial_weight).sum(1),
+            feature.amax(1), feature[:, 0], feature[:, -1],
+        ), -1)
+
+        weight = self.token_weight[None, :, None]
+        tokens = (
+            feature[:, self.token_left] * (1 - weight)
+            + feature[:, self.token_right] * weight
+        )
         return self.global_map(summary), self.token_map(tokens)
 
 class Query(nn.Module):
@@ -89,16 +199,22 @@ class PINN(nn.Module):
         for name, value in scales.items():
             self.register_buffer(name, torch.as_tensor(value, dtype=torch.float32))
 
-        # 初始条件编码器
-        self.ic = mlp(ic_dim, 64, 64, 32)
-        # 边界时间序列编码器：上游流量、下游水位
-        self.q_encoder, self.z_encoder = TemporalEncoder(), TemporalEncoder()
-        # 将初始条件、流量边界、水位边界融合
-        self.fuse_residual = nn.Sequential(nn.Linear(128, 32), nn.Tanh())   # 简单投影结果
-        self.fuse_value = mlp(128, 64, 32)  # 复杂融合结果？
-        self.fuse_gate = nn.Sequential(
-            nn.Linear(128, 64), nn.Sigmoid(), 
-            nn.Linear(64, 32), nn.Sigmoid())    # 门控加权
+        # IC 是沿河道的不规则空间场，水位和流量分别编码。
+        self.ic_z_encoder = CoordinateSpatialEncoder(self.ic_x)
+        self.ic_q_encoder = CoordinateSpatialEncoder(self.ic_x)
+        self.ic_z_query, self.ic_q_query = Query(), Query()
+
+        # BC 是规则采样的时间序列，采用小波与可学习卷积混合编码。
+        self.q_encoder = WaveletTemporalEncoder()
+        self.z_encoder = WaveletTemporalEncoder()
+
+        # 在全局和局部两个层级分别按相同规则融合 IC 与 BC。
+        self.ic_global_fuse = mlp(64, 64, 32)
+        self.bc_global_fuse = mlp(64, 64, 32)
+        self.global_fuse = mlp(64, 64, 32)
+        self.ic_local_fuse = mlp(64, 64, 32)
+        self.bc_local_fuse = mlp(64, 64, 32)
+        self.local_fuse = mlp(64, 64, 32)
 
         # 地形编码器
         self.geo = GeometryEncoder(32)  # 断面内部相对地形
@@ -109,10 +225,8 @@ class PINN(nn.Module):
         # 共享网络
         self.shared = nn.Sequential(mlp(96, 96, 64), nn.Tanh())
 
-        # 查询器：提取与当前预测位置相关的局部信息；并将流量与水位局部特征融合
+        # 查询器：提取与当前预测位置相关的边界局部信息。
         self.q_query, self.z_query = Query(), Query()
-        # 局部流量和局部水位特征之的相互作用
-        self.query_fuse = mlp(96, 64, 32)
 
         self.z_head, self.q_head = mlp(224, 128, 64, 1), mlp(224, 128, 64, 1)   # 水位/流量输出头
 
@@ -150,18 +264,41 @@ class PINN(nn.Module):
 
         iz, iq = ic.chunk(2, -1)
         bq, bz = bc.chunk(2, -1)
-        ic_code = self.ic(torch.cat(((iz - self.z_mean) / self.z_std, 
-                                     (iq.clamp_min(1e-6).log() - self.q_log_mean) / self.q_log_std
-                                    ), -1)[:1]).expand(len(x), -1)
+        iz = ((iz - self.z_mean) / self.z_std)[:1]
+        iq = ((iq.clamp_min(1e-6).log() - self.q_log_mean) / self.q_log_std)[:1]
+        bq = ((bq.clamp_min(1e-6).log() - self.q_log_mean) / self.q_log_std)[:1]
+        bz = ((bz - self.z_mean) / self.z_std)[:1]
 
-        q_global, q_tokens = self.q_encoder(((bq.clamp_min(1e-6).log() - self.q_log_mean) / self.q_log_std)[:1])
-        z_global, z_tokens = self.z_encoder(((bz - self.z_mean) / self.z_std)[:1])
-        q_code, z_code = q_global.expand(len(x), -1), z_global.expand(len(x), -1)
-        q_local, z_local = self.q_query(coordinate, q_tokens, self.q_encoder.positions), self.z_query(coordinate, z_tokens, self.z_encoder.positions)
-        combined = torch.cat((ic_code, q_code, z_code, q_code * z_code), -1)
+        iz_global, iz_tokens = self.ic_z_encoder(iz)
+        iq_global, iq_tokens = self.ic_q_encoder(iq)
+        bq_global, bq_tokens = self.q_encoder(bq)
+        bz_global, bz_tokens = self.z_encoder(bz)
 
-        gate = self.fuse_gate(combined)
-        condition = gate * self.fuse_value(combined) + (1 - gate) * self.fuse_residual(combined) + self.query_fuse(torch.cat((q_local, z_local, q_local * z_local), -1))
+        ic_global = self.ic_global_fuse(torch.cat((iz_global, iq_global), -1))
+        bc_global = self.bc_global_fuse(torch.cat((bq_global, bz_global), -1))
+        global_condition = self.global_fuse(
+            torch.cat((ic_global, bc_global), -1)
+        ).expand(len(x), -1)
+
+        # Query 的第二个坐标用于局部约束；交换 x/t 后即可查询空间 token。
+        spatial_coordinate = coordinate.flip(-1)
+        iz_local = self.ic_z_query(
+            spatial_coordinate, iz_tokens, self.ic_z_encoder.positions
+        )
+        iq_local = self.ic_q_query(
+            spatial_coordinate, iq_tokens, self.ic_q_encoder.positions
+        )
+        bq_local = self.q_query(
+            coordinate, bq_tokens, self.q_encoder.positions
+        )
+        bz_local = self.z_query(
+            coordinate, bz_tokens, self.z_encoder.positions
+        )
+
+        ic_local = self.ic_local_fuse(torch.cat((iz_local, iq_local), -1))
+        bc_local = self.bc_local_fuse(torch.cat((bq_local, bz_local), -1))
+        local_condition = self.local_fuse(torch.cat((ic_local, bc_local), -1))
+        condition = global_condition + local_condition
 
         if geo_weight is None:
             geo_code = self.terrain_code(geo, mask)
@@ -176,7 +313,9 @@ class PINN(nn.Module):
 
         trunk = self.trunk(torch.cat(encoded, -1))
         shared = self.shared(torch.cat((condition, geo_code, trunk), -1))
-        route = torch.cat((shared, q_code, q_local, z_local, geo_code, trunk), -1)
+        route = torch.cat((
+            shared, global_condition, ic_local, bc_local, geo_code, trunk
+        ), -1)
 
         z = bed + self.depth_mean * F.softplus(self.z_head(route))
         q = torch.exp(self.q_log_mean + self.q_log_std * self.q_head(route))
@@ -197,7 +336,8 @@ def make_scales(cases):
     length, dref, aref = x.max() - x.min(), depth.median(), area.median()
     velocity = (9.81 * dref).sqrt()
     return dict(
-        x_min=x.min(), x_max=x.max(), t_min=t.min(), t_max=t.max(), 
+        x_min=x.min(), x_max=x.max(), t_min=t.min(), t_max=t.max(),
+        ic_x=cases[0]["x"],
         z_mean=z.mean(), z_std=z.std(False),
         q_log_mean=q.log().mean(), q_log_std=q.log().std(), 
         station_mean=geometry[:, 0].mean(), station_std=geometry[:, 0].std(False),
