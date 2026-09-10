@@ -5,6 +5,7 @@
 /out/
 /checkpoints/
 /logs/
+/Ablation/
 
 # Model and array files
 *.pt
