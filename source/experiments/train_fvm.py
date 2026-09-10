@@ -114,8 +114,8 @@ class PINN(nn.Module):
         # 局部流量和局部水位特征之的相互作用
         self.query_fuse = mlp(96, 64, 32)
 
-        self.z_adapter = nn.Sequential(mlp(64, 64, 64), nn.Tanh())  # 根据“地形形状 + 局部水位边界”修正共享特征
-        self.z_gate = nn.Parameter(torch.tensor(0.0))
+        # self.z_adapter = nn.Sequential(mlp(64, 64, 64), nn.Tanh())  # 根据“地形形状 + 局部水位边界”修正共享特征
+        # self.z_gate = nn.Parameter(torch.tensor(0.0))
         self.z_head, self.q_head = mlp(256, 128, 64, 1), mlp(256, 128, 64, 1)   # 水位/流量输出头
 
         self.apply(initialize_weights)
@@ -168,7 +168,7 @@ class PINN(nn.Module):
 
         trunk = self.trunk(torch.cat(encoded, -1))
         shared = self.shared(torch.cat((condition, geo_code, trunk), -1))
-        shared = shared + self.z_gate * self.z_adapter(torch.cat((terrain, z_local), -1))
+        # shared = shared + self.z_gate * self.z_adapter(torch.cat((terrain, z_local), -1))
         route = torch.cat((shared, q_code, q_local, z_local, geo_code, trunk, terrain), -1)
 
         z = bed + self.depth_mean * F.softplus(self.z_head(route))
