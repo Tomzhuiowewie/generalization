@@ -8,7 +8,7 @@ def initialize_weights(module):
         if module.bias is not None:
             nn.init.zeros_(module.bias)
 
-
+# 地形编码器
 class GeometryEncoder(nn.Module):
     def __init__(self, geo_dim=64):
         super().__init__()
@@ -31,6 +31,8 @@ class GeometryEncoder(nn.Module):
         count = mask.sum(dim=1).clamp_min(1.0)
 
         return feature / count                  # [B, geo_dim]
+
+
 
 
 class OperatorPINN(nn.Module):

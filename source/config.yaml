@@ -35,8 +35,8 @@ plot:
 
 fvm2:
   seed: 2032
-  epochs: 200
-  cases_per_batch: 4
+  epochs: 201
+  cases_per_batch: 8
   points_per_case: 64 # 采样点
   num_threads: 4
   manning_n: 0.020816
