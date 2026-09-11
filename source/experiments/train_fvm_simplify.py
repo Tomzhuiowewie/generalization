@@ -44,10 +44,6 @@ class GeometryEncoder(nn.Module):
         )
 
     def forward(self, geo, mask):
-        """
-        geo:  [batch, max_points, 2]
-        mask: [batch, max_points]
-        """
         feature = self.point_net(geo)           # [B, P, geo_dim]
         mask = mask.unsqueeze(-1).float()       # [B, P, 1]
 
@@ -57,69 +53,54 @@ class GeometryEncoder(nn.Module):
 
         return feature / count                  # [B, geo_dim]
 
-# 边界条件编码
-class WaveletTemporalEncoder(nn.Module):
-    """原始时间卷积与两层固定Haar小波的门控融合"""
+# 边界条件编码：使用一维卷积编码边界时间序列
+class TemporalEncoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.raw_map = nn.Sequential(
-            nn.Conv1d(1, 16, 7, padding=3), nn.Tanh(),
-            nn.Conv1d(16, 32, 5, padding=2), nn.Tanh(),
+
+        self.conv = nn.Sequential(
+            nn.Conv1d(1, 16, 7, padding=3),
+            nn.Tanh(),
+            nn.Conv1d(16, 32, 5, padding=2),
+            nn.Tanh(),
+            nn.Conv1d(32, 32, 3, padding=1),
+            nn.Tanh(),
         )
-        self.wavelet_map = nn.Sequential(
-            nn.Conv1d(3, 16, 5, padding=2), nn.Tanh(),
-            nn.Conv1d(16, 32, 3, padding=1), nn.Tanh(),
-        )
-        self.gate = nn.Parameter(torch.zeros(1, 32, 1))
-        self.output = nn.Sequential(
-            nn.Conv1d(32, 32, 3, padding=1), nn.Tanh()
-        )
+
         self.attention = nn.Conv1d(32, 1, 1)
         self.global_map = mlp(160, 64, 32)
         self.token_map = mlp(64, 32, 32)
-        self.register_buffer("positions", torch.linspace(-1, 1, 64)[:, None])
 
-    @staticmethod
-    def haar(signal):
-        if signal.shape[-1] % 2:
-            signal = F.pad(signal, (0, 1), mode="replicate")
-        even, odd = signal[..., 0::2], signal[..., 1::2]
-        scale = math.sqrt(0.5)
-        return (even + odd) * scale, (even - odd) * scale
+        self.register_buffer("positions", torch.linspace(-1, 1, 64)[:, None],)
 
     def forward(self, sequence):
-        signal = sequence.unsqueeze(1)
-        approx1, detail1 = self.haar(signal)
-        approx2, detail2 = self.haar(approx1)
-        length = signal.shape[-1]
-        bands = torch.cat((
-            F.interpolate(approx2, size=length, mode="linear", align_corners=False),
-            F.interpolate(detail2, size=length, mode="linear", align_corners=False),
-            F.interpolate(detail1, size=length, mode="linear", align_corners=False),
-        ), 1)
+        feature = self.conv(sequence.unsqueeze(1))
 
-        raw_feature = self.raw_map(signal)
-        wavelet_feature = self.wavelet_map(bands)
-        feature = self.output(
-            raw_feature + torch.sigmoid(self.gate) * wavelet_feature
+        attention = torch.softmax(
+            self.attention(feature),
+            dim=-1,
         )
 
-        weight = torch.softmax(self.attention(feature), -1)
         summary = torch.cat((
-            (feature * weight).sum(-1),
-            feature.mean(-1), feature.amax(-1),
-            feature[..., 0], feature[..., -1],
-        ), -1)
+            (feature * attention).sum(-1),
+            feature.mean(-1),
+            feature.amax(-1),
+            feature[..., 0],
+            feature[..., -1],
+        ), dim=-1)
+
         tokens = torch.cat((
             F.adaptive_avg_pool1d(feature, 64),
             F.adaptive_max_pool1d(feature, 64),
-        ), 1).transpose(1, 2)
-        return self.global_map(summary), self.token_map(tokens)
+        ), dim=1).transpose(1, 2)
 
-# 初始条件编码
+        return (
+            self.global_map(summary),
+            self.token_map(tokens),
+        )
+
+# 初始条件编码：显式使用不规则空间坐标和相邻断面间距
 class CoordinateSpatialEncoder(nn.Module):
-    """显式使用不规则空间坐标和相邻断面间距"""
-
     def __init__(self, source_x, token_count=64):
         super().__init__()
         source_x = source_x.float()
@@ -205,9 +186,8 @@ class CoordinateSpatialEncoder(nn.Module):
         )
         return self.global_map(summary), self.token_map(tokens)
 
+# 查询器：使用学习得到的时空输运坐标来查询边界 token
 class Query(nn.Module):
-    """使用学习得到的时空输运坐标来查询边界 token"""
-
     def __init__(self):
         super().__init__()
         self.query, self.key, self.value = mlp(6, 32, 32), nn.Linear(33, 32), nn.Linear(32, 32)
@@ -222,9 +202,8 @@ class Query(nn.Module):
         score = score - F.softplus(self.locality) * (t - positions.T).square()
         return self.output(torch.softmax(score, -1) @ self.value(token))
 
+# 条件融合，预测
 class PINN(nn.Module):
-    """融合 IC, boundary, geometry and coordinates, then predict Z and log-Q."""
-
     def __init__(self, ic_dim, scales):
         super().__init__()
         for name, value in scales.items():
@@ -235,18 +214,9 @@ class PINN(nn.Module):
         self.ic_q_encoder = CoordinateSpatialEncoder(self.ic_x)
         self.ic_z_query, self.ic_q_query = Query(), Query()
 
-        # BC 是规则采样的时间序列，采用小波与可学习卷积混合编码
-        self.q_encoder = WaveletTemporalEncoder()
-        self.z_encoder = WaveletTemporalEncoder()
-
-        # 在全局和局部两个层级分别按相同规则融合 IC 与 BC
-        # self.ic_global_fuse = mlp(64, 64, 32)
-        # self.bc_global_fuse = mlp(64, 64, 32)
-        # self.global_fuse = mlp(64, 64, 32)
-
-        # self.ic_local_fuse = mlp(64, 64, 32)
-        # self.bc_local_fuse = mlp(64, 64, 32)
-        # self.local_fuse = mlp(64, 64, 32)
+        # BC 是规则采样的时间序列，采用一维卷积编码
+        self.q_encoder = TemporalEncoder()
+        self.z_encoder = TemporalEncoder()
         
         # 直接融合IC水位、IC流量、BC流量和BC水位
         self.global_fuse = mlp(128, 64, 32)
@@ -266,6 +236,7 @@ class PINN(nn.Module):
         # 水位/流量输出头
         self.z_head = mlp(192, 128, 64, 1)
         self.q_head = mlp(192, 128, 64, 1)  
+
         self.apply(initialize_weights)
         for module in self.modules():
             if isinstance(module, nn.Conv1d):
@@ -283,9 +254,7 @@ class PINN(nn.Module):
             (elevation - bed) / self.elevation_std,
         ), -1)
         feature = torch.where(
-            mask[..., None],
-            feature,
-            torch.zeros_like(feature),
+            mask[..., None], feature, torch.zeros_like(feature),
         )
         return self.geo(feature, mask)
 
@@ -302,16 +271,6 @@ class PINN(nn.Module):
         iq_global, iq_tokens = self.ic_q_encoder(iq)
         bq_global, bq_tokens = self.q_encoder(bq)
         bz_global, bz_tokens = self.z_encoder(bz)
-
-        # ic_global = self.ic_global_fuse(
-        #     torch.cat((iz_global, iq_global), dim=-1)
-        # )
-        # bc_global = self.bc_global_fuse(
-        #     torch.cat((bq_global, bz_global), dim=-1)
-        # )
-        # global_condition = self.global_fuse(
-        #     torch.cat((ic_global, bc_global), dim=-1)
-        # )
 
         global_condition = self.global_fuse(torch.cat((
             iz_global, iq_global, bq_global, bz_global,
@@ -349,9 +308,6 @@ class PINN(nn.Module):
             coordinate, bz_tokens, self.z_encoder.positions
         )
 
-        # ic_local = self.ic_local_fuse(torch.cat((iz_local, iq_local), -1))
-        # bc_local = self.bc_local_fuse(torch.cat((bq_local, bz_local), -1))
-        # local_condition = self.local_fuse(torch.cat((ic_local, bc_local), -1))
         local_condition = self.local_fuse(torch.cat((
             iz_local, iq_local, bq_local, bz_local,
         ), dim=-1))
@@ -370,9 +326,6 @@ class PINN(nn.Module):
 
         trunk = self.trunk(torch.cat(encoded, -1))
         shared = self.shared(torch.cat((condition, geo_code, trunk), -1))
-        # route = torch.cat((
-        #     shared, global_condition, ic_local, bc_local, geo_code, trunk
-        # ), -1)
         route = torch.cat((
             shared, global_condition, local_condition, geo_code, trunk,
         ), dim=-1)
@@ -468,10 +421,12 @@ def pinn_losses(model, cases, points):
         tt = tb + dt    # 上边界
         xm, tm = (xl + xr) / 2, (tb + tt) / 2   # 中心点
 
-        _, qb, ab, _ = state(model, case, xm, tb, condition_cache)   # 下时间面：流量、面积
-        _, qt, at, _ = state(model, case, xm, tt, condition_cache)   # 上时间面：流量、面积
-        _, ql, al, _ = state(model, case, xl, tm, condition_cache)   # 左空间面：流量、面积
-        _, qr, ar, _ = state(model, case, xr, tm, condition_cache)   # 右空间面：流量、面积
+        face_x = torch.cat((xm, xm, xl, xr), dim=0)
+        face_t = torch.cat((tb, tt, tm, tm), dim=0)
+        _, face_q, face_area, _ = state(model, case, face_x, face_t, condition_cache)
+
+        qb, qt, ql, qr = face_q.chunk(4, dim=0)
+        ab, at, al, ar = face_area.chunk(4, dim=0)
 
         # 质量方程
         mass = (
@@ -505,6 +460,7 @@ def pinn_losses(model, cases, points):
         )))
 
     return torch.stack(result).mean(0)
+
 
 def balance(model, batch_losses):
     """对六个单位化梯度取平均，使得不会有某个任务仅仅因为梯度幅值更大而占据主导"""
@@ -541,7 +497,7 @@ def main():
         (config_path.parent.resolve().parent / config["paths"]["pt"][name]).resolve(),
         map_location="cpu", weights_only=True)
     train_data, val_data, test_data = load("train"), load("validation"), load("test")
-    # train_data, val_data = sample_cases(train_data, 105, seed), sample_cases(val_data, 30, seed)
+    train_data, val_data = sample_cases(train_data, 210, seed), sample_cases(val_data, 60, seed)
 
     train_input = []
     for case in train_data.values():
@@ -573,24 +529,38 @@ def main():
             balance(model, batch_losses)    # 梯度求平均
             optimizer.step()
             total_losses += batch_losses.detach().double() * len(cases)
-
+        
         mean_losses = (total_losses / len(train)).tolist()
-        train_z, train_q = relative_error(model, train_cases, cfg["val_time_step"], cfg["val_time_batch"])
-        row = {"epoch": epoch, "lr": lr, **dict(zip(loss_name, mean_losses)), "train_z_error": train_z, "train_q_error": train_q}
+        row = {"epoch": epoch, "lr": lr, **dict(zip(loss_name, mean_losses))}
         message = (f"epoch={epoch:02d} lr={lr:.2e} " +
-                   " ".join(f"{name}={value:.3e}" for name, value in zip(loss_name, mean_losses)) +
-                   f" train_z={train_z:.4f}% train_q={train_q:.4f}%")
+                " ".join(f"{name}={value:.3e}" for name, value in zip(loss_name, mean_losses)))
 
         # 验证误差
         if epoch % 5 == 0 or epoch == epochs:
-            z_error, q_error = relative_error(model, val_cases, cfg["val_time_step"], cfg["val_time_batch"])
-            row.update(z_error=z_error, q_error=q_error, score=max(z_error, q_error))
-
+            train_z, train_q = relative_error(
+                model, train_cases,
+                cfg["val_time_step"], cfg["val_time_batch"],
+            )
+            val_z_error, val_q_error = relative_error(
+                model, val_cases, 
+                cfg["val_time_step"], cfg["val_time_batch"]
+            )
+            row.update(
+                train_z_error=train_z, train_q_error=train_q,
+                val_z_error=val_z_error, val_q_error=val_q_error, 
+                score=max(val_z_error, val_q_error)
+            )
+            
             if row["score"] < best:
                 best = row["score"]
                 state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
                 torch.save({"model_state_dict": state, "epoch": epoch, "validation": row}, output / "best.pt")
-            message += f" val_z={z_error:.4f}% val_q={q_error:.4f}% best={best:.4f}%"
+
+            message += (
+                f" train_z={train_z:.4f}% train_q={train_q:.4f}%"
+                f" val_z={val_z_error:.4f}% val_q={val_q_error:.4f}%"
+                f" best={best:.4f}%"
+            )
 
         print(message, flush=True)
         history.append(row)
@@ -605,9 +575,7 @@ def main():
     result = {
         "checkpoint_epoch": selected["epoch"], 
         "validation": selected["validation"],
-        "test_z": test_z, 
-        "test_q": test_q, 
-        "test_max": max(test_z, test_q)
+        "test_z": test_z,  "test_q": test_q,  "test_max": max(test_z, test_q)
         }
     (output / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(result, flush=True)
