@@ -248,7 +248,7 @@ def pinn_losses(model, cases, points):
             boundary_q.append(((qp[:, 0].log() - q_target[index].log()) / model.q_log_std).square().mean()) # 上游/下游损失
 
         # PDE损失：随机选取有限体积单元：在单元面上计算连续性方程，通过高斯积分计算动量方程
-        dx, dt = (case["x"][-1] - case["x"][0]) / 32, (case["t"][-1] - case["t"][0]) / 24   # 时空区域划分
+        dx, dt = (case["x"][-1] - case["x"][0]) / 64, (case["t"][-1] - case["t"][0]) / 48   # 时空区域划分
         xl = case["x"][0] + torch.rand(points, 1, device=device) * (case["x"][-1] - case["x"][0] - dx)  # 左边界
         xr = xl + dx    # 右边界
         tb = case["t"][0] + torch.rand(points, 1, device=device) * (case["t"][-1] - case["t"][0] - dt)  # 下边界
@@ -328,7 +328,7 @@ def main():
         (config_path.parent.resolve().parent / config["paths"]["pt"][name]).resolve(),
         map_location="cpu", weights_only=True)
     train_data, val_data, test_data = load("train"), load("validation"), load("test")
-    train_data, val_data = sample_cases(train_data, 105, seed), sample_cases(val_data, 30, seed)
+    # train_data, val_data = sample_cases(train_data, 105, seed), sample_cases(val_data, 30, seed)
 
     train_input = []
     for case in train_data.values():

@@ -205,7 +205,6 @@ class CoordinateSpatialEncoder(nn.Module):
         )
         return self.global_map(summary), self.token_map(tokens)
 
-
 class Query(nn.Module):
     """使用学习得到的时空输运坐标来查询边界 token"""
 
@@ -222,7 +221,6 @@ class Query(nn.Module):
         score = query @ self.key(torch.cat((token, positions), -1)).T / math.sqrt(32)
         score = score - F.softplus(self.locality) * (t - positions.T).square()
         return self.output(torch.softmax(score, -1) @ self.value(token))
-
 
 class PINN(nn.Module):
     """融合 IC, boundary, geometry and coordinates, then predict Z and log-Q."""
@@ -383,7 +381,6 @@ class PINN(nn.Module):
         q = torch.exp(self.q_log_mean + self.q_log_std * self.q_head(route))
         return z, q
 
-
 def make_scales(cases):
     z, q, depth, area, geometry = [], [], [], [], []
     for case in cases:
@@ -425,7 +422,6 @@ def state(model, case, x, t, condition_cache=None):   # 计算水力状态
     area, perimeter = water_area_at_x(x, z, case["x"], case["geo"], case["geo_mask"])
     area = area[:, None].clamp_min(1e-6)
     return z, q, area, (area / perimeter[:, None].clamp_min(1e-6)).clamp_min(1e-6)
-
 
 def pinn_losses(model, cases, points):
     result = []
@@ -510,7 +506,6 @@ def pinn_losses(model, cases, points):
 
     return torch.stack(result).mean(0)
 
-
 def balance(model, batch_losses):
     """对六个单位化梯度取平均，使得不会有某个任务仅仅因为梯度幅值更大而占据主导"""
     parameters, vectors = list(model.parameters()), []
@@ -528,7 +523,6 @@ def balance(model, batch_losses):
         size = parameter.numel() 
         parameter.grad = combined[offset:offset + size].view_as(parameter).clone()
         offset += size
-
 
 def main():
     cfg = config["fvm2"]; seed = cfg["seed"]
