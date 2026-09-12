@@ -497,7 +497,7 @@ def main():
         (config_path.parent.resolve().parent / config["paths"]["pt"][name]).resolve(),
         map_location="cpu", weights_only=True)
     train_data, val_data, test_data = load("train"), load("validation"), load("test")
-    train_data, val_data = sample_cases(train_data, 210, seed), sample_cases(val_data, 60, seed)
+    # train_data, val_data = sample_cases(train_data, 210, seed), sample_cases(val_data, 60, seed)
 
     train_input = []
     for case in train_data.values():
