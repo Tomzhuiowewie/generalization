@@ -7,7 +7,7 @@
 /logs/
 /Ablation/
 /tmp/
-
+../PINTO/
 # Model and array files
 *.pt
 *.pth

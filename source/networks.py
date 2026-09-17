@@ -33,8 +33,6 @@ class GeometryEncoder(nn.Module):
         return feature / count                  # [B, geo_dim]
 
 
-
-
 class OperatorPINN(nn.Module):
     def __init__(self, condition_dim, scales):
         super().__init__()

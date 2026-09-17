@@ -34,7 +34,7 @@ plot:
   contour_levels: 8
 
 fvm2:
-  seed: 2032
+  seed: 2034
   epochs: 251
   cases_per_batch: 8
   points_per_case: 64 # 采样点
@@ -46,3 +46,11 @@ fvm2:
   output_path: '../out/train_fvm'
   val_time_step: 24
   val_time_batch: 24
+
+attation:
+  epochs: 300
+  train_cases: 30
+  val_cases: 24
+  test_cases: 24
+  patience: 10
+  min_delta: 0.05
